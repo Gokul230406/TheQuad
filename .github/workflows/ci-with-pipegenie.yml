@@ -39,8 +39,8 @@ jobs:
     if: failure()  # Only run if the CI job fails
     
     steps:
-      - name: Notify PipeGenie of failure
-        run: |
+      #- name: Notify PipeGenie of failure
+       # run: |
           curl -X POST "${{ secrets.PIPEGENIE_URL }}/api/webhook/github" \
             -H "Content-Type: application/json" \
             -H "X-GitHub-Event: workflow_run" \
