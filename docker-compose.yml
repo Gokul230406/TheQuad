@@ -1,0 +1,57 @@
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:7.0
+    container_name: pipegenie-mongo
+    restart: unless-stopped
+    ports: ["27017:27017"]
+    volumes:
+      - mongo_data:/data/db
+    environment:
+      MONGO_INITDB_DATABASE: pipegenie
+
+  redis:
+    image: redis:7-alpine
+    container_name: pipegenie-redis
+    restart: unless-stopped
+    ports: ["6379:6379"]
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: pipegenie-backend
+    restart: unless-stopped
+    ports: ["8000:8000"]
+    environment:
+      - MONGODB_URL=mongodb://mongodb:27017
+      - REDIS_URL=redis://redis:6379
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - USE_OLLAMA=true
+      - LLM_MODEL=mistral
+    env_file: ./backend/.env
+    depends_on: [mongodb, redis]
+    volumes:
+      - ./chroma_db:/app/chroma_db
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: pipegenie-ollama
+    restart: unless-stopped
+    ports: ["11434:11434"]
+    volumes:
+      - ollama_data:/root/.ollama
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: pipegenie-frontend
+    restart: unless-stopped
+    ports: ["5173:80"]
+    depends_on: [backend]
+
+volumes:
+  mongo_data:
+  ollama_data:
