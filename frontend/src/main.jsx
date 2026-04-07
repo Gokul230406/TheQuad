@@ -11,13 +11,13 @@ ReactDOM.createRoot(document.getElementById('root')).render(
       position="top-right"
       toastOptions={{
         style: {
-          background: '#1e1e2e',
-          color: '#cdd6f4',
-          border: '1px solid #313244',
+          background: 'var(--panel)',
+          color: 'var(--text)',
+          border: '1px solid var(--line-strong)',
           borderRadius: '12px',
         },
-        success: { iconTheme: { primary: '#a6e3a1', secondary: '#1e1e2e' } },
-        error: { iconTheme: { primary: '#f38ba8', secondary: '#1e1e2e' } },
+        success: { iconTheme: { primary: 'var(--ok)', secondary: 'var(--panel)' } },
+        error: { iconTheme: { primary: 'var(--danger)', secondary: 'var(--panel)' } },
       }}
     />
   </React.StrictMode>
