@@ -1,6 +1,8 @@
 import os
 from pydantic_settings import BaseSettings
-from typing import Optional
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent.parent
 
 class Settings(BaseSettings):
     # App
@@ -10,7 +12,7 @@ class Settings(BaseSettings):
     SECRET_KEY: str = "pipegenie-super-secret-key-change-in-prod"
 
     # MongoDB
-    MONGODB_URL: str #= "mongodb://localhost:27017"
+    MONGODB_URL: str   # must come from .env
     MONGODB_DB: str = "pipegenie"
 
     # Redis
@@ -22,10 +24,10 @@ class Settings(BaseSettings):
     GITHUB_WEBHOOK_SECRET: str = "pipegenie-webhook-secret"
 
     # AI / Mistral
-    MISTRAL_API_KEY: str = ""          # For Mistral API
+    MISTRAL_API_KEY: str = ""
     OLLAMA_BASE_URL: str = "http://localhost:11434"
-    USE_OLLAMA: bool = True            # True = local Ollama, False = Mistral API
-    LLM_MODEL: str = "mistral"         # Ollama model name
+    USE_OLLAMA: bool = True
+    LLM_MODEL: str = "mistral"
 
     # ChromaDB
     CHROMA_PERSIST_DIR: str = "./chroma_db"
@@ -41,7 +43,7 @@ class Settings(BaseSettings):
     FRONTEND_URL: str = "http://localhost:5173"
 
     class Config:
-        env_file = ".env"
+        env_file = str(BASE_DIR / ".env")   # ✅ FIXED HERE
         extra = "ignore"
 
 settings = Settings()
