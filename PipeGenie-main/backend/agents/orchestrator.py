@@ -122,7 +122,8 @@ class AgentOrchestrator:
             fix_script=fix.get("fix_script", ""),
             repo_url=f"https://github.com/{event.repo_full_name}",
             branch=event.branch,
-            event_id=str(event.id)
+            event_id=str(event.id),
+            repo_full_name=event.repo_full_name,
         )
 
         # Save fix record

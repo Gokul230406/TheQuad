@@ -29,6 +29,15 @@ const FLOW_STEPS = [
 
 const STATUS_ORDER = ['failed', 'diagnosing', 'fix_pending', 'awaiting_approval', 'fixing', 'retrying', 'fixed']
 
+function formatTimelineDetails(details) {
+  if (!details || typeof details !== 'object') return ''
+
+  return Object.entries(details)
+    .filter(([, value]) => value !== undefined && value !== null && value !== '')
+    .map(([key, value]) => `${key.replace(/_/g, ' ')}: ${typeof value === 'string' ? value : JSON.stringify(value)}`)
+    .join(' · ')
+}
+
 function statusVariant(status) {
   if (status === 'fixed') return 'success'
   if (status === 'failed' || status === 'failed_to_fix') return 'danger'
@@ -97,6 +106,7 @@ export default function EventDetail() {
   }
 
   const riskPercent = Math.round((event.risk_score || 0) * 100)
+  const timeline = event.metadata?.timeline || []
 
   return (
     <div className="page-stack">
@@ -130,6 +140,7 @@ export default function EventDetail() {
         <Button variant={tab === 'overview' ? 'default' : 'ghost'} size="sm" onClick={() => setTab('overview')}>Overview</Button>
         <Button variant={tab === 'diagnosis' ? 'default' : 'ghost'} size="sm" onClick={() => setTab('diagnosis')}>Diagnosis</Button>
         <Button variant={tab === 'fix' ? 'default' : 'ghost'} size="sm" onClick={() => setTab('fix')}>Fix and risk</Button>
+        <Button variant={tab === 'timeline' ? 'default' : 'ghost'} size="sm" onClick={() => setTab('timeline')}>Timeline</Button>
         <Button variant={tab === 'logs' ? 'default' : 'ghost'} size="sm" onClick={() => setTab('logs')}>Logs</Button>
       </div>
 
@@ -208,6 +219,39 @@ export default function EventDetail() {
             </CardContent>
           </Card>
         </div>
+      )}
+
+      {tab === 'timeline' && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Action timeline</CardTitle>
+            <CardDescription>Timestamped record of the failure-to-resolution workflow.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            {timeline.length === 0 ? (
+              <div className="empty-block">No timeline events recorded yet.</div>
+            ) : (
+              <div className="event-timeline">
+                {timeline.map((entry, index) => (
+                  <div key={`${entry.timestamp || 'timeline'}-${index}`} className="event-timeline-item">
+                    <div className="event-timeline-marker" />
+                    <div className="event-timeline-content">
+                      <div className="event-timeline-head">
+                        <strong>{entry.message || entry.step || 'Timeline event'}</strong>
+                        <Badge variant={statusVariant(entry.status)}>{String(entry.status || 'unknown').replace(/_/g, ' ')}</Badge>
+                      </div>
+                      <div className="event-timeline-meta">
+                        <span>{entry.step || 'step'}</span>
+                        {entry.timestamp && <span>{formatDistanceToNow(new Date(entry.timestamp), { addSuffix: true })}</span>}
+                      </div>
+                      {formatTimelineDetails(entry.details) && <p>{formatTimelineDetails(entry.details)}</p>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
       )}
 
       {tab === 'logs' && (

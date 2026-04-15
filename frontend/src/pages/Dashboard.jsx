@@ -62,24 +62,41 @@ function getStatusBadgeVariant(status) {
   return 'secondary'
 }
 
-function buildTrendData(stats) {
-  const total = stats?.total_events ?? 0
-  const fixed = stats?.fixed ?? 0
-  const avgTotal = Math.max(4, Math.round(total / 7))
-  const avgFixed = Math.max(2, Math.round(fixed / 7))
-  const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+async function buildTrendData() {
+  try {
+    const response = await fetch('http://localhost:8000/api/dashboard/events?page=1&limit=100')
+    const data = await response.json()
+    const events = data.events || []
 
-  return days.map((day, index) => {
-    const variation = ((index % 3) - 1) * 2
-    const failures = Math.max(1, avgTotal + variation)
-    const resolved = Math.max(0, Math.min(failures, avgFixed + variation + 1))
-
-    return {
-      day,
-      failures,
-      resolved,
+    if (events.length === 0) {
+      // No events yet, return empty chart
+      return []
     }
-  })
+
+    // Group events by date
+    const byDate = {}
+    events.forEach((event) => {
+      try {
+        const date = new Date(event.created_at)
+        const day = date.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
+        if (!byDate[day]) byDate[day] = { failures: 0, resolved: 0 }
+        byDate[day].failures += 1
+        if (event.status === 'fixed') byDate[day].resolved += 1
+      } catch (e) {
+        console.error('Error processing event date:', e)
+      }
+    })
+
+    // Return all dates with data (not just last 7), sorted
+    const result = Object.entries(byDate)
+      .map(([day, counts]) => ({ day, ...counts }))
+    
+    console.log('Chart data:', result)
+    return result
+  } catch (e) {
+    console.error('Failed to build trend data:', e)
+    return []
+  }
 }
 
 export default function Dashboard() {
@@ -109,9 +126,9 @@ export default function Dashboard() {
   async function fetchData() {
     try {
       const [statsRes, eventsRes, reposRes] = await Promise.all([
-        fetch('/api/dashboard/stats'),
-        fetch('/api/dashboard/events?limit=8'),
-        fetch('/api/dashboard/repositories'),
+        fetch('http://localhost:8000/api/dashboard/stats'),
+        fetch('http://localhost:8000/api/dashboard/events?page=1&limit=8'),
+        fetch('http://localhost:8000/api/dashboard/repositories'),
       ])
       const statsData = await statsRes.json()
       const eventsData = await eventsRes.json()
@@ -120,7 +137,8 @@ export default function Dashboard() {
       setStats(statsData)
       setEvents(eventsData.events || [])
       setRepositories(reposData.repositories || [])
-      setChartData(buildTrendData(statsData))
+      const trendData = await buildTrendData()
+      setChartData(trendData)
     } catch (_) {
       return
     } finally {
@@ -253,19 +271,19 @@ export default function Dashboard() {
                 <AreaChart data={chartData} margin={{ top: 8, right: 6, left: -20, bottom: 0 }}>
                   <defs>
                     <linearGradient id="failuresFill" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#6f7680" stopOpacity={0.35} />
-                      <stop offset="100%" stopColor="#6f7680" stopOpacity={0} />
+                      <stop offset="0%" stopColor="#61afef" stopOpacity={0.35} />
+                      <stop offset="100%" stopColor="#61afef" stopOpacity={0} />
                     </linearGradient>
                     <linearGradient id="resolvedFill" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#b0b6bf" stopOpacity={0.28} />
-                      <stop offset="100%" stopColor="#b0b6bf" stopOpacity={0} />
+                      <stop offset="0%" stopColor="#61afef" stopOpacity={0.28} />
+                      <stop offset="100%" stopColor="#61afef" stopOpacity={0} />
                     </linearGradient>
                   </defs>
-                  <XAxis dataKey="day" tickLine={false} axisLine={false} tick={{ fill: '#8f959f', fontSize: 12 }} />
-                  <YAxis tickLine={false} axisLine={false} tick={{ fill: '#8f959f', fontSize: 12 }} />
+                  <XAxis dataKey="day" tickLine={false} axisLine={false} tick={{ fill: '#61afef', fontSize: 12 }} />
+                  <YAxis tickLine={false} axisLine={false} tick={{ fill: '#61afef', fontSize: 12 }} />
                   <Tooltip content={<ChartTooltip />} />
-                  <Area type="monotone" dataKey="failures" stroke="#8d939b" fill="url(#failuresFill)" strokeWidth={2} name="Failures" />
-                  <Area type="monotone" dataKey="resolved" stroke="#c0c5cd" fill="url(#resolvedFill)" strokeWidth={2} name="Resolved" />
+                  <Area type="monotone" dataKey="failures" stroke="#61afef" fill="url(#failuresFill)" strokeWidth={2} name="Failures" />
+                  <Area type="monotone" dataKey="resolved" stroke="#61afef" fill="url(#resolvedFill)" strokeWidth={2} name="Resolved" />
                 </AreaChart>
               </ResponsiveContainer>
             </div>

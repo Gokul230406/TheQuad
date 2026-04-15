@@ -97,3 +97,42 @@ class GitHubService:
             except Exception as e:
                 logger.error(f"[GitHub] Run info error: {e}")
         return {}
+
+    async def create_pull_request(
+        self,
+        repo: str,
+        head_branch: str,
+        base_branch: str,
+        title: str,
+        body: str
+    ) -> dict:
+        """Create a pull request and return metadata."""
+        if not self.token:
+            logger.warning("[GitHub] No token configured, skipping PR creation")
+            return {}
+
+        url = f"{self.BASE_URL}/repos/{repo}/pulls"
+        payload = {
+            "title": title,
+            "head": head_branch,
+            "base": base_branch,
+            "body": body,
+            "draft": False
+        }
+
+        async with httpx.AsyncClient() as client:
+            try:
+                resp = await client.post(url, headers=self.headers, json=payload, timeout=20)
+                if resp.status_code in (200, 201):
+                    data = resp.json()
+                    return {
+                        "number": data.get("number"),
+                        "html_url": data.get("html_url", ""),
+                        "state": data.get("state", "open")
+                    }
+
+                logger.warning(f"[GitHub] PR creation failed: {resp.status_code} {resp.text[:300]}")
+                return {}
+            except Exception as e:
+                logger.error(f"[GitHub] PR creation error: {e}")
+                return {}

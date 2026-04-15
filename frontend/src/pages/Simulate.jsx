@@ -62,7 +62,7 @@ export default function Simulate() {
   const [scenario, setScenario] = useState(SAMPLE_SCENARIOS[0])
   const [customizing, setCustomizing] = useState(false)
   const [form, setForm] = useState({
-    repo: 'demo-org/my-app',
+    repo: 'harshitha090/vehicle-detection',
     branch: SAMPLE_SCENARIOS[0].branch,
     commit_sha: 'abc1234def',
     commit_message: 'fix: adjust dependency graph',

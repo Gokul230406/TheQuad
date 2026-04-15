@@ -29,6 +29,29 @@ class AgentOrchestrator:
         self.vector_store = VectorStore()
         self.ws_manager = ws_manager  # WebSocket broadcast manager
 
+    async def _append_timeline(
+        self,
+        event: PipelineEvent,
+        step: str,
+        message: str,
+        status: PipelineStatus | None = None,
+        details: dict | None = None,
+    ):
+        timeline = event.metadata.get("timeline")
+        if not isinstance(timeline, list):
+            timeline = []
+
+        timeline.append({
+            "step": step,
+            "message": message,
+            "status": (status or event.status).value if hasattr((status or event.status), "value") else str(status or event.status),
+            "timestamp": datetime.utcnow().isoformat(),
+            "details": details or {},
+        })
+
+        event.metadata["timeline"] = timeline
+        event.update_timestamp()
+
     async def process_failure(self, event: PipelineEvent):
         """Main orchestration pipeline for a pipeline failure."""
         logger.info(f"[Orchestrator] Starting processing for event {event.event_id}")
@@ -36,6 +59,12 @@ class AgentOrchestrator:
         try:
             # === STEP 1: DIAGNOSIS ===
             event.status = PipelineStatus.DIAGNOSING
+            await self._append_timeline(
+                event,
+                "diagnosis_started",
+                "Diagnosis started",
+                details={"repo": event.repo_full_name, "branch": event.branch},
+            )
             await event.save()
             await self._broadcast("diagnosis_started", event)
 
@@ -53,12 +82,22 @@ class AgentOrchestrator:
                 diagnosis.get("failure_category", "unknown")
             )
             event.metadata["diagnosis"] = diagnosis
-            event.update_timestamp()
+            await self._append_timeline(
+                event,
+                "diagnosis_complete",
+                "Diagnosis completed",
+                details={"failure_category": diagnosis.get("failure_category", "unknown")},
+            )
             await event.save()
             await self._broadcast("diagnosis_complete", event, extra={"diagnosis": diagnosis})
 
             # === STEP 2: FIX GENERATION ===
             event.status = PipelineStatus.FIX_PENDING
+            await self._append_timeline(
+                event,
+                "fix_generation_started",
+                "Fix generation started",
+            )
             await event.save()
 
             fix = await self.fixer_agent.generate_fix(
@@ -71,7 +110,12 @@ class AgentOrchestrator:
             event.proposed_fix = fix.get("fix_description")
             event.fix_script = fix.get("fix_script")
             event.metadata["fix"] = fix
-            event.update_timestamp()
+            await self._append_timeline(
+                event,
+                "fix_generated",
+                "Fix generated",
+                details={"fix_type": fix.get("fix_type", "unknown")},
+            )
             await event.save()
             await self._broadcast("fix_generated", event, extra={"fix": fix})
 
@@ -86,7 +130,12 @@ class AgentOrchestrator:
             event.risk_score = risk["score"]
             event.risk_level = risk["level"]
             event.metadata["risk"] = risk
-            event.update_timestamp()
+            await self._append_timeline(
+                event,
+                "risk_evaluated",
+                "Risk evaluated",
+                details={"risk_level": risk["level"], "risk_score": risk["score"]},
+            )
             await event.save()
             await self._broadcast("risk_evaluated", event, extra={"risk": risk})
 
@@ -114,6 +163,12 @@ class AgentOrchestrator:
     ):
         """Execute fix in Docker and trigger re-run."""
         event.status = PipelineStatus.FIXING
+        await self._append_timeline(
+            event,
+            "fix_execution_started",
+            "Fix execution started",
+            details={"approved_by": approved_by, "auto_applied": auto_applied},
+        )
         await event.save()
         await self._broadcast("fix_applying", event)
 
@@ -122,7 +177,8 @@ class AgentOrchestrator:
             fix_script=fix.get("fix_script", ""),
             repo_url=f"https://github.com/{event.repo_full_name}",
             branch=event.branch,
-            event_id=str(event.id)
+            event_id=str(event.id),
+            repo_full_name=event.repo_full_name,
         )
 
         # Save fix record
@@ -137,7 +193,10 @@ class AgentOrchestrator:
             duration_seconds=result.get("duration", 0),
             auto_applied=auto_applied,
             container_id=result.get("container_id"),
-            metadata={"approved_by": approved_by} if approved_by else {}
+            metadata={
+                "approved_by": approved_by,
+                "fix_branch": result.get("fix_branch")
+            } if approved_by else {"fix_branch": result.get("fix_branch")}
         )
         await fix_record.insert()
 
@@ -145,6 +204,13 @@ class AgentOrchestrator:
             event.fix_applied = True
             event.fix_output = result.get("output", "")
             event.status = PipelineStatus.RETRYING
+            fix_branch = result.get("fix_branch")
+            await self._append_timeline(
+                event,
+                "fix_execution_succeeded",
+                "Fix execution succeeded",
+                details={"fix_branch": fix_branch},
+            )
 
             # Store fix in vector DB for future use
             await self.vector_store.store_fix(
@@ -154,24 +220,59 @@ class AgentOrchestrator:
                 fix_data=fix
             )
 
-            # Trigger GitHub Actions re-run
-            rerun_ok = await self.github_service.trigger_rerun(
-                repo=event.repo_full_name,
-                run_id=event.event_id
-            )
+            if settings.REPO_WRITEBACK_ENABLED and settings.AUTO_OPEN_PR and fix_branch:
+                pr = await self.github_service.create_pull_request(
+                    repo=event.repo_full_name,
+                    head_branch=fix_branch,
+                    base_branch=event.branch,
+                    title=f"PipeGenie fix: {event.workflow_name} failure",
+                    body=(
+                        f"Automated fix generated by PipeGenie for event `{event.event_id}`.\n\n"
+                        f"Root cause: {event.root_cause or 'Unknown'}\n"
+                        f"Risk: {event.risk_level or 'unknown'} ({event.risk_score})"
+                    )
+                )
+                if pr:
+                    event.metadata["pull_request"] = pr
+
+            # Trigger GitHub Actions re-run when no PR flow is available.
+            rerun_ok = False
+            if not event.metadata.get("pull_request"):
+                rerun_ok = await self.github_service.trigger_rerun(
+                    repo=event.repo_full_name,
+                    run_id=event.event_id
+                )
+
             event.re_run_triggered = rerun_ok
             event.status = PipelineStatus.FIXED
+            await self._append_timeline(
+                event,
+                "pipeline_resolved",
+                "Pipeline resolved",
+                details={"rerun_triggered": rerun_ok, "pull_request": event.metadata.get("pull_request")},
+            )
         else:
             event.status = PipelineStatus.FAILED_TO_FIX
             event.fix_output = result.get("output", "")
+            await self._append_timeline(
+                event,
+                "fix_execution_failed",
+                "Fix execution failed",
+                details={"exit_code": result.get("exit_code", 1)},
+            )
 
-        event.update_timestamp()
         await event.save()
         await self._broadcast("fix_complete", event, extra={"result": result})
 
     async def _request_approval(self, event: PipelineEvent, fix: dict, risk: dict):
         """Create an approval request for a generated fix."""
         event.status = PipelineStatus.AWAITING_APPROVAL
+        await self._append_timeline(
+            event,
+            "approval_requested",
+            "Approval requested",
+            details={"risk_level": risk["level"], "risk_score": risk["score"]},
+        )
         await event.save()
 
         approval = ApprovalRequest(
@@ -215,6 +316,13 @@ class AgentOrchestrator:
 
         fix = event.metadata.get("fix", {})
         risk = event.metadata.get("risk", {})
+        await self._append_timeline(
+            event,
+            "approval_approved",
+            f"Approval approved by {reviewer}",
+            details={"reviewer": reviewer, "note": note},
+        )
+        await event.save()
         await self._auto_apply_fix(event, fix, risk, auto_applied=False, approved_by=reviewer)
 
     async def reject_fix(self, approval_id: str, reviewer: str, note: str = ""):
@@ -233,7 +341,12 @@ class AgentOrchestrator:
         if event:
             event.status = PipelineStatus.FAILED_TO_FIX
             event.metadata["rejection_note"] = note
-            event.update_timestamp()
+            await self._append_timeline(
+                event,
+                "approval_rejected",
+                f"Approval rejected by {reviewer}",
+                details={"reviewer": reviewer, "note": note},
+            )
             await event.save()
             await self._broadcast("fix_rejected", event)
 

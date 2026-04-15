@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     # GitHub
     GITHUB_TOKEN: str = ""
     GITHUB_WEBHOOK_SECRET: str = "pipegenie-webhook-secret"
+    REPO_WRITEBACK_ENABLED: bool = True
+    AUTO_OPEN_PR: bool = True
+    PIPEGENIE_BOT_NAME: str = "PipeGenie Bot"
+    PIPEGENIE_BOT_EMAIL: str = "pipegenie-bot@users.noreply.github.com"
 
     # AI / Mistral
     MISTRAL_API_KEY: str = ""          # For Mistral API

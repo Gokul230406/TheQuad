@@ -4,11 +4,10 @@ Docker Runner – Executes fix scripts inside isolated Docker containers.
 import asyncio
 import logging
 import time
-import tempfile
 import os
-from typing import Optional
+import re
 import docker
-from docker.errors import DockerException, NotFound
+from docker.errors import DockerException
 
 from backend.config import settings
 
@@ -47,7 +46,7 @@ class DockerRunner:
                 logger.warning("[DockerRunner] Dockerfile not found, using base image")
 
     async def run_fix(self, fix_script: str, repo_url: str,
-                      branch: str, event_id: str) -> dict:
+                      branch: str, event_id: str, repo_full_name: str) -> dict:
         """
         Execute a fix script inside a Docker container.
         Returns: {"exit_code": int, "output": str, "duration": float, "container_id": str}
@@ -57,12 +56,58 @@ class DockerRunner:
 
         start_time = time.time()
         container_id = None
+        fix_branch = self._build_fix_branch(event_id)
 
         try:
-            # Write script to temp file
-            script_content = f"""#!/bin/bash
+            if settings.REPO_WRITEBACK_ENABLED:
+                # Execute generated fix script against a cloned repository checkout.
+                script_content = f"""#!/bin/bash
 set -e
 echo "=== PipeGenie Fix Runner ==="
+echo "Event: {event_id}"
+echo "Repo: {repo_url}"
+echo "Branch: {branch}"
+echo "Fix Branch: {fix_branch}"
+echo "================================"
+
+if [ -z "$REPO_FULL_NAME" ]; then
+    echo "Missing REPO_FULL_NAME"
+    exit 1
+fi
+
+AUTH_REPO_URL="https://github.com/$REPO_FULL_NAME.git"
+if [ -n "$GITHUB_TOKEN" ]; then
+    AUTH_REPO_URL="https://x-access-token:$GITHUB_TOKEN@github.com/$REPO_FULL_NAME.git"
+fi
+
+rm -rf /workspace/repo
+git clone --depth 1 --branch "$BRANCH" "$AUTH_REPO_URL" /workspace/repo
+cd /workspace/repo
+
+git config user.name "$PIPEGENIE_BOT_NAME"
+git config user.email "$PIPEGENIE_BOT_EMAIL"
+git checkout -b "$FIX_BRANCH"
+
+{fix_script}
+
+if git diff --quiet && git diff --cached --quiet; then
+    echo "No repository changes detected after fix script"
+    echo "PIPEGENIE_FIX_BRANCH=$FIX_BRANCH"
+    exit 0
+fi
+
+git add -A
+git commit -m "chore(pipegenie): apply generated fix for event {event_id}"
+git push origin "$FIX_BRANCH"
+
+echo "PIPEGENIE_FIX_BRANCH=$FIX_BRANCH"
+
+echo "=== Fix Script Completed ==="
+"""
+            else:
+                script_content = f"""#!/bin/bash
+set -e
+echo "=== PipeGenie Script-Only Runner ==="
 echo "Event: {event_id}"
 echo "Repo: {repo_url}"
 echo "Branch: {branch}"
@@ -78,9 +123,14 @@ echo "=== Fix Script Completed ==="
                 command=["bash", "-c", script_content],
                 environment={
                     "REPO_URL": repo_url,
+                    "REPO_FULL_NAME": repo_full_name,
                     "BRANCH": branch,
+                    "FIX_BRANCH": fix_branch,
                     "EVENT_ID": event_id,
-                    "PYTHONUNBUFFERED": "1"
+                    "PYTHONUNBUFFERED": "1",
+                    "GITHUB_TOKEN": settings.GITHUB_TOKEN,
+                    "PIPEGENIE_BOT_NAME": settings.PIPEGENIE_BOT_NAME,
+                    "PIPEGENIE_BOT_EMAIL": settings.PIPEGENIE_BOT_EMAIL,
                 },
                 mem_limit="512m",
                 cpu_period=100000,
@@ -95,21 +145,26 @@ echo "=== Fix Script Completed ==="
 
             duration = time.time() - start_time
             output = container.decode("utf-8") if isinstance(container, bytes) else str(container)
+            parsed_fix_branch = self._extract_fix_branch(output) or (fix_branch if settings.REPO_WRITEBACK_ENABLED else None)
 
             return {
                 "exit_code": 0,
                 "output": output,
                 "duration": duration,
-                "container_id": container_id or "completed"
+                "container_id": container_id or "completed",
+                "fix_branch": parsed_fix_branch,
             }
 
         except docker.errors.ContainerError as e:
             duration = time.time() - start_time
+            stderr = e.stderr.decode("utf-8") if e.stderr else str(e)
+            parsed_fix_branch = self._extract_fix_branch(stderr) or (fix_branch if settings.REPO_WRITEBACK_ENABLED else None)
             return {
                 "exit_code": e.exit_status,
-                "output": e.stderr.decode("utf-8") if e.stderr else str(e),
+                "output": stderr,
                 "duration": duration,
-                "container_id": container_id or "failed"
+                "container_id": container_id or "failed",
+                "fix_branch": parsed_fix_branch,
             }
         except Exception as e:
             logger.error(f"[DockerRunner] Unexpected error: {e}")
@@ -117,8 +172,17 @@ echo "=== Fix Script Completed ==="
                 "exit_code": 1,
                 "output": f"Docker execution failed: {str(e)}",
                 "duration": time.time() - start_time,
-                "container_id": "error"
+                "container_id": "error",
+                "fix_branch": fix_branch if settings.REPO_WRITEBACK_ENABLED else None,
             }
+
+    def _build_fix_branch(self, event_id: str) -> str:
+        safe = re.sub(r"[^a-zA-Z0-9-]", "-", event_id)[:24]
+        return f"pipegenie/fix-{safe}"
+
+    def _extract_fix_branch(self, output: str) -> str | None:
+        match = re.search(r"PIPEGENIE_FIX_BRANCH=([^\s]+)", output or "")
+        return match.group(1) if match else None
 
     def _image_exists(self) -> bool:
         try:
@@ -147,5 +211,6 @@ echo "=== Fix Script Completed ==="
             "exit_code": 0,
             "output": f"[SIMULATED] Fix script executed successfully:\n{fix_script[:300]}\n[DONE]",
             "duration": 2.0,
-            "container_id": "simulated-success"
+            "container_id": "simulated-success",
+            "fix_branch": "pipegenie/fix-simulated"
         }
