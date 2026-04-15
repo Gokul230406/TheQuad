@@ -90,16 +90,11 @@ class AgentOrchestrator:
             await event.save()
             await self._broadcast("risk_evaluated", event, extra={"risk": risk})
 
-            # === STEP 4: ROUTE BY RISK ===
-            if risk["level"] == "low":
-                logger.info(f"[Orchestrator] Low risk – auto-applying fix")
-                await self._auto_apply_fix(event, fix, risk)
-            elif risk["level"] == "medium":
-                logger.info(f"[Orchestrator] Medium risk – auto-apply with caution")
-                await self._auto_apply_fix(event, fix, risk)
-            else:
-                logger.info(f"[Orchestrator] High risk – routing to human approval")
-                await self._request_approval(event, fix, risk)
+            # === STEP 4: ALWAYS REQUIRE HUMAN APPROVAL ===
+            logger.info(
+                f"[Orchestrator] Routing fix to human approval (risk={risk['level']}, score={risk['score']})"
+            )
+            await self._request_approval(event, fix, risk)
 
         except Exception as e:
             logger.error(f"[Orchestrator] Pipeline failed for {event.event_id}: {e}", exc_info=True)
@@ -109,7 +104,14 @@ class AgentOrchestrator:
             await event.save()
             await self._broadcast("processing_failed", event, extra={"error": str(e)})
 
-    async def _auto_apply_fix(self, event: PipelineEvent, fix: dict, risk: dict):
+    async def _auto_apply_fix(
+        self,
+        event: PipelineEvent,
+        fix: dict,
+        risk: dict,
+        auto_applied: bool = True,
+        approved_by: str | None = None
+    ):
         """Execute fix in Docker and trigger re-run."""
         event.status = PipelineStatus.FIXING
         await event.save()
@@ -133,8 +135,9 @@ class AgentOrchestrator:
             exit_code=result.get("exit_code", 1),
             status=FixStatus.SUCCESS if result.get("exit_code") == 0 else FixStatus.FAILED,
             duration_seconds=result.get("duration", 0),
-            auto_applied=True,
-            container_id=result.get("container_id")
+            auto_applied=auto_applied,
+            container_id=result.get("container_id"),
+            metadata={"approved_by": approved_by} if approved_by else {}
         )
         await fix_record.insert()
 
@@ -167,7 +170,7 @@ class AgentOrchestrator:
         await self._broadcast("fix_complete", event, extra={"result": result})
 
     async def _request_approval(self, event: PipelineEvent, fix: dict, risk: dict):
-        """Create an approval request for high-risk fixes."""
+        """Create an approval request for a generated fix."""
         event.status = PipelineStatus.AWAITING_APPROVAL
         await event.save()
 
@@ -212,7 +215,7 @@ class AgentOrchestrator:
 
         fix = event.metadata.get("fix", {})
         risk = event.metadata.get("risk", {})
-        await self._auto_apply_fix(event, fix, risk)
+        await self._auto_apply_fix(event, fix, risk, auto_applied=False, approved_by=reviewer)
 
     async def reject_fix(self, approval_id: str, reviewer: str, note: str = ""):
         """Called when a human rejects a fix."""

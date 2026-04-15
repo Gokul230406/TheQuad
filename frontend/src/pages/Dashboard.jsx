@@ -88,6 +88,7 @@ export default function Dashboard() {
 
   const [stats, setStats] = useState(null)
   const [events, setEvents] = useState([])
+  const [repositories, setRepositories] = useState([])
   const [loading, setLoading] = useState(true)
   const [chartData, setChartData] = useState([])
 
@@ -107,15 +108,18 @@ export default function Dashboard() {
 
   async function fetchData() {
     try {
-      const [statsRes, eventsRes] = await Promise.all([
+      const [statsRes, eventsRes, reposRes] = await Promise.all([
         fetch('/api/dashboard/stats'),
         fetch('/api/dashboard/events?limit=8'),
+        fetch('/api/dashboard/repositories'),
       ])
       const statsData = await statsRes.json()
       const eventsData = await eventsRes.json()
+      const reposData = await reposRes.json()
 
       setStats(statsData)
       setEvents(eventsData.events || [])
+      setRepositories(reposData.repositories || [])
       setChartData(buildTrendData(statsData))
     } catch (_) {
       return
@@ -184,6 +188,25 @@ export default function Dashboard() {
             <Signal size={12} />
             {wsConnected ? 'Live connected' : 'Reconnecting'}
           </Badge>
+        </div>
+      </div>
+
+      <div className="dashboard-kpi-strip">
+        <div>
+          <span>Total processed</span>
+          <strong>{stats?.total_events ?? 0}</strong>
+        </div>
+        <div>
+          <span>Pending approvals</span>
+          <strong>{stats?.pending_approvals ?? 0}</strong>
+        </div>
+        <div>
+          <span>Fix success</span>
+          <strong>{successRate}%</strong>
+        </div>
+        <div>
+          <span>Events 24h</span>
+          <strong>{stats?.events_last_24h ?? 0}</strong>
         </div>
       </div>
 
@@ -290,6 +313,37 @@ export default function Dashboard() {
       </div>
 
       <Card>
+        <CardHeader>
+          <CardTitle>Repository coverage</CardTitle>
+          <CardDescription>Most impacted repositories based on processed pipeline events.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {repositories.length === 0 ? (
+            <div className="dashboard-empty">No repository stats available yet.</div>
+          ) : (
+            <div className="dashboard-repo-list">
+              {repositories.slice(0, 6).map((repo) => {
+                const successPct = repo.total > 0 ? Math.round((repo.fixed / repo.total) * 100) : 0
+                return (
+                  <div key={repo.repo} className="dashboard-repo-item">
+                    <div>
+                      <p>{repo.repo}</p>
+                      <span>{repo.total} incidents tracked</span>
+                    </div>
+                    <div>
+                      <Badge variant={successPct >= 60 ? 'success' : successPct >= 30 ? 'warning' : 'danger'}>
+                        {successPct}% fixed
+                      </Badge>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
         <CardHeader className="dashboard-events-header">
           <div>
             <CardTitle>Recent incidents</CardTitle>
@@ -304,34 +358,45 @@ export default function Dashboard() {
           {events.length === 0 ? (
             <div className="dashboard-empty">No incidents found.</div>
           ) : (
-            <div className="dashboard-events-list">
-              <div className="dashboard-events-list-head">
-                <span>Repository</span>
-                <span>Status</span>
-              </div>
-              {events.map((event) => (
-                <button key={event.id} className="dashboard-event-row" onClick={() => navigate(`/events/${event.id}`)}>
-                  <div className="dashboard-event-main">
-                    <p>{event.repo_full_name}</p>
-                    <span>
-                      <GitBranch size={12} />
-                      {event.branch}
-                    </span>
-                  </div>
-                  <div className="dashboard-event-meta">
-                    <Badge variant={getStatusBadgeVariant(event.status)}>
-                      {String(event.status || 'unknown').replace(/_/g, ' ')}
-                    </Badge>
-                    {event.risk_level && (
-                      <Badge variant="outline">
-                        <Shield size={11} />
-                        {event.risk_level}
-                      </Badge>
-                    )}
-                    <span>{formatDistanceToNow(new Date(event.created_at), { addSuffix: true })}</span>
-                  </div>
-                </button>
-              ))}
+            <div className="dashboard-events-table-wrap">
+              <table className="dashboard-events-table">
+                <thead>
+                  <tr>
+                    <th>Repository</th>
+                    <th>Branch</th>
+                    <th>Status</th>
+                    <th>Risk</th>
+                    <th>Created</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {events.map((event) => (
+                    <tr key={event.id} className="table-click" onClick={() => navigate(`/events/${event.id}`)}>
+                      <td>{event.repo_full_name}</td>
+                      <td>
+                        <span className="history-branch-cell">
+                          <GitBranch size={12} />
+                          {event.branch}
+                        </span>
+                      </td>
+                      <td>
+                        <Badge variant={getStatusBadgeVariant(event.status)}>
+                          {String(event.status || 'unknown').replace(/_/g, ' ')}
+                        </Badge>
+                      </td>
+                      <td>
+                        {event.risk_level ? (
+                          <Badge variant="outline">
+                            <Shield size={11} />
+                            {event.risk_level}
+                          </Badge>
+                        ) : '-'}
+                      </td>
+                      <td>{formatDistanceToNow(new Date(event.created_at), { addSuffix: true })}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           )}
         </CardContent>

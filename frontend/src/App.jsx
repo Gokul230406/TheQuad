@@ -2,6 +2,8 @@ import React, { useEffect, useRef, useState } from 'react'
 import { BrowserRouter, NavLink, Route, Routes } from 'react-router-dom'
 import {
   Activity,
+  BookOpen,
+  Circle,
   FlaskConical,
   History as HistoryIcon,
   LayoutDashboard,
@@ -18,10 +20,11 @@ import Simulate from './pages/Simulate.jsx'
 import EventDetail from './pages/EventDetail.jsx'
 
 const WS_URL = 'ws://localhost:8000/api/dashboard/ws'
+const BACKEND_BASE_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000'
 
 export const WSContext = React.createContext(null)
 
-function Sidebar({ pendingCount, liveCount, wsConnected, theme, onToggleTheme }) {
+function Sidebar({ pendingCount, liveCount, wsConnected, theme, onToggleTheme, backendInfo }) {
   const navItems = [
     { path: '/', label: 'Dashboard', icon: LayoutDashboard, exact: true },
     { path: '/approvals', label: 'Approvals', icon: ShieldAlert, badge: pendingCount },
@@ -38,6 +41,7 @@ function Sidebar({ pendingCount, liveCount, wsConnected, theme, onToggleTheme })
         <div>
           <p className="sidebar-brand-title">PipeGenie</p>
           <p className="sidebar-brand-subtitle">Reliability Ops Console</p>
+          <span className="sidebar-brand-tag">Autonomous CI Guardrail</span>
         </div>
       </div>
 
@@ -79,8 +83,43 @@ function Sidebar({ pendingCount, liveCount, wsConnected, theme, onToggleTheme })
           <p>Active workflows</p>
           <strong>{liveCount}</strong>
         </div>
+        <div className="sidebar-backend-status">
+          <p>Backend</p>
+          <div>
+            <span className={`sidebar-backend-dot ${backendInfo.healthy ? 'ok' : 'warn'}`} />
+            <strong>{backendInfo.healthy ? 'Healthy' : 'Unavailable'}</strong>
+          </div>
+          <small>
+            {backendInfo.name || 'PipeGenie'} {backendInfo.version || 'unknown'}
+          </small>
+        </div>
       </div>
     </aside>
+  )
+}
+
+function OpsToolbar({ backendInfo, wsConnected }) {
+  return (
+    <header className="ops-toolbar">
+      <div className="ops-toolbar-title">
+        <h2>Operations Command Surface</h2>
+        <p>Live reliability telemetry, guarded remediation workflows, and incident audit trails.</p>
+      </div>
+      <div className="ops-toolbar-meta">
+        <div className="ops-chip">
+          <Circle size={10} className={backendInfo.healthy ? 'ops-chip-dot-ok' : 'ops-chip-dot-warn'} />
+          Backend {backendInfo.healthy ? 'healthy' : 'unavailable'}
+        </div>
+        <div className="ops-chip">WS {wsConnected ? 'connected' : 'reconnecting'}</div>
+        <a className="ops-link" href={`${BACKEND_BASE_URL}/`} target="_blank" rel="noreferrer">
+          API root
+        </a>
+        <a className="ops-link" href={`${BACKEND_BASE_URL}/docs`} target="_blank" rel="noreferrer">
+          <BookOpen size={13} />
+          Docs
+        </a>
+      </div>
+    </header>
   )
 }
 
@@ -89,6 +128,11 @@ export default function App() {
   const [wsConnected, setWsConnected] = useState(false)
   const [pendingCount, setPendingCount] = useState(0)
   const [liveCount, setLiveCount] = useState(0)
+  const [backendInfo, setBackendInfo] = useState({
+    healthy: false,
+    name: 'PipeGenie',
+    version: 'unknown',
+  })
   const wsRef = useRef(null)
   const pingIntervalRef = useRef(null)
   const [theme, setTheme] = useState(() => {
@@ -105,11 +149,15 @@ export default function App() {
   useEffect(() => {
     connectWS()
     fetchPendingCount()
+    fetchBackendInfo()
+
+    const healthInterval = setInterval(fetchBackendInfo, 30000)
 
     return () => {
       if (pingIntervalRef.current) {
         clearInterval(pingIntervalRef.current)
       }
+      clearInterval(healthInterval)
       wsRef.current?.close()
     }
   }, [])
@@ -181,6 +229,26 @@ export default function App() {
     }
   }
 
+  async function fetchBackendInfo() {
+    try {
+      const [rootRes, healthRes] = await Promise.all([
+        fetch(`${BACKEND_BASE_URL}/`),
+        fetch(`${BACKEND_BASE_URL}/health`),
+      ])
+
+      const root = rootRes.ok ? await rootRes.json() : null
+      const health = healthRes.ok ? await healthRes.json() : null
+
+      setBackendInfo({
+        healthy: health?.status === 'healthy',
+        name: root?.name || 'PipeGenie',
+        version: root?.version || 'unknown',
+      })
+    } catch (_) {
+      setBackendInfo((prev) => ({ ...prev, healthy: false }))
+    }
+  }
+
   return (
     <WSContext.Provider value={{ wsMessages, wsConnected }}>
       <BrowserRouter>
@@ -191,8 +259,10 @@ export default function App() {
             wsConnected={wsConnected}
             theme={theme}
             onToggleTheme={() => setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'))}
+            backendInfo={backendInfo}
           />
           <main className="app-main">
+            <OpsToolbar backendInfo={backendInfo} wsConnected={wsConnected} />
             <Routes>
               <Route path="/" element={<Dashboard />} />
               <Route path="/approvals" element={<Approvals onCountChange={setPendingCount} />} />

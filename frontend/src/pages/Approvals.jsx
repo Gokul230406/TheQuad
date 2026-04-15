@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useState } from 'react'
 import {
   AlertTriangle,
   CheckCircle2,
@@ -25,10 +25,32 @@ function riskVariant(level) {
   return 'warning'
 }
 
-function ApprovalItem({ approval, onApprove, onReject }) {
+function ApprovalItem({ approval, onApprove, onReject, onLoadDetails }) {
   const [expanded, setExpanded] = useState(false)
   const [note, setNote] = useState('')
   const [loading, setLoading] = useState(false)
+  const [details, setDetails] = useState(null)
+  const [detailsLoading, setDetailsLoading] = useState(false)
+
+  useEffect(() => {
+    let active = true
+
+    async function loadDetails() {
+      if (!expanded || details) return
+      setDetailsLoading(true)
+      const payload = await onLoadDetails(approval.id)
+      if (active && payload) setDetails(payload)
+      if (active) setDetailsLoading(false)
+    }
+
+    loadDetails()
+
+    return () => {
+      active = false
+    }
+  }, [expanded, details, approval.id, onLoadDetails])
+
+  const entry = details || approval
 
   async function handleApprove() {
     setLoading(true)
@@ -42,7 +64,7 @@ function ApprovalItem({ approval, onApprove, onReject }) {
     setLoading(false)
   }
 
-  const riskPct = Math.round((approval.risk_score || 0) * 100)
+  const riskPct = Math.round((entry.risk_score || 0) * 100)
 
   return (
     <Card className="approvals-item">
@@ -53,16 +75,16 @@ function ApprovalItem({ approval, onApprove, onReject }) {
               <h3>{approval.repo_full_name}</h3>
               <Badge variant="warning">Pending review</Badge>
             </div>
-            <p>{approval.branch} · {approval.commit_sha?.slice(0, 7) || 'unknown'}</p>
+            <p>{entry.branch} · {entry.commit_sha?.slice(0, 7) || 'unknown'}</p>
           </div>
           <div className="approvals-item-meta">
-            <Badge variant={riskVariant(approval.risk_level)}>
+            <Badge variant={riskVariant(entry.risk_level)}>
               <Shield size={11} />
-              {approval.risk_level || 'unknown'} risk
+              {entry.risk_level || 'unknown'} risk
             </Badge>
             <span>
               <Clock3 size={12} />
-              {formatDistanceToNow(new Date(approval.created_at), { addSuffix: true })}
+              {formatDistanceToNow(new Date(entry.created_at), { addSuffix: true })}
             </span>
           </div>
         </div>
@@ -70,11 +92,11 @@ function ApprovalItem({ approval, onApprove, onReject }) {
         <div className="approvals-item-grid">
           <div>
             <p className="approvals-label">Root cause</p>
-            <div className="approvals-surface">{approval.root_cause || 'No diagnosis available.'}</div>
+            <div className="approvals-surface">{entry.root_cause || 'No diagnosis available.'}</div>
           </div>
           <div>
             <p className="approvals-label">Proposed fix</p>
-            <div className="approvals-surface">{approval.proposed_fix || 'No proposed fix available.'}</div>
+            <div className="approvals-surface">{entry.proposed_fix || 'No proposed fix available.'}</div>
           </div>
         </div>
 
@@ -86,9 +108,9 @@ function ApprovalItem({ approval, onApprove, onReject }) {
           <Progress value={riskPct} />
         </div>
 
-        {approval.risk_reasons?.length > 0 && (
+        {entry.risk_reasons?.length > 0 && (
           <div className="approvals-risks">
-            {approval.risk_reasons.map((reason, index) => (
+            {entry.risk_reasons.map((reason, index) => (
               <div key={index}>
                 <AlertTriangle size={12} />
                 <span>{reason}</span>
@@ -103,7 +125,8 @@ function ApprovalItem({ approval, onApprove, onReject }) {
           {expanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
         </Button>
 
-        {expanded && <pre className="approvals-code">{approval.fix_script || 'No script available.'}</pre>}
+        {expanded && detailsLoading && <div className="approvals-loading-note">Loading latest approval details...</div>}
+        {expanded && <pre className="approvals-code">{entry.fix_script || 'No script available.'}</pre>}
 
         <textarea
           className="ui-input"
@@ -131,6 +154,7 @@ export default function Approvals({ onCountChange }) {
   const [approvals, setApprovals] = useState([])
   const [loading, setLoading] = useState(true)
   const [tab, setTab] = useState('pending')
+  const [detailsCache, setDetailsCache] = useState({})
 
   useEffect(() => {
     fetchApprovals()
@@ -146,11 +170,25 @@ export default function Approvals({ onCountChange }) {
       setApprovals(data.approvals || [])
       if (tab === 'pending') onCountChange?.(data.total || 0)
     } catch (_) {
-      return
+      setApprovals([])
+    } finally {
+      setLoading(false)
     }
-
-    setLoading(false)
   }
+
+  const fetchApprovalDetails = useCallback(async (id) => {
+    if (detailsCache[id]) return detailsCache[id]
+
+    try {
+      const response = await fetch(`/api/approvals/${id}`)
+      if (!response.ok) return null
+      const data = await response.json()
+      setDetailsCache((prev) => ({ ...prev, [id]: data }))
+      return data
+    } catch (_) {
+      return null
+    }
+  }, [detailsCache])
 
   async function handleApprove(id, note) {
     try {
@@ -241,7 +279,13 @@ export default function Approvals({ onCountChange }) {
           </Card>
         ) : (
           pending.map((approval) => (
-            <ApprovalItem key={approval.id} approval={approval} onApprove={handleApprove} onReject={handleReject} />
+            <ApprovalItem
+              key={approval.id}
+              approval={approval}
+              onApprove={handleApprove}
+              onReject={handleReject}
+              onLoadDetails={fetchApprovalDetails}
+            />
           ))
         )
       ) : (

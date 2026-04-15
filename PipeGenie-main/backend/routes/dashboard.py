@@ -5,6 +5,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect, Request
+from beanie.operators import In
 
 from backend.models.pipeline_event import PipelineEvent, PipelineStatus
 from backend.models.approval_request import ApprovalRequest, ApprovalStatus
@@ -22,7 +23,7 @@ async def get_stats():
     failed_to_fix = await PipelineEvent.find(PipelineEvent.status == PipelineStatus.FAILED_TO_FIX).count()
     awaiting = await PipelineEvent.find(PipelineEvent.status == PipelineStatus.AWAITING_APPROVAL).count()
     in_progress = await PipelineEvent.find(
-        PipelineEvent.status.in_([
+        In(PipelineEvent.status, [
             PipelineStatus.DIAGNOSING, PipelineStatus.FIX_PENDING,
             PipelineStatus.FIXING, PipelineStatus.RETRYING
         ])

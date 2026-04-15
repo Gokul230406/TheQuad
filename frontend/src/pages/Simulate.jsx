@@ -70,6 +70,7 @@ export default function Simulate() {
     logs: SAMPLE_SCENARIOS[0].logs,
   })
   const [loading, setLoading] = useState(false)
+  const [pingingWebhook, setPingingWebhook] = useState(false)
   const [result, setResult] = useState(null)
 
   function selectScenario(nextScenario) {
@@ -98,6 +99,31 @@ export default function Simulate() {
     }
 
     setLoading(false)
+  }
+
+  async function pingGithubWebhook() {
+    setPingingWebhook(true)
+
+    try {
+      const response = await fetch('/api/webhook/github', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-GitHub-Event': 'ping',
+        },
+        body: JSON.stringify({ zen: 'PipeGenie frontend ping' }),
+      })
+
+      if (response.ok) {
+        toast.success('GitHub webhook endpoint is reachable.')
+      } else {
+        toast.error('Webhook ping failed. Check signature/secret configuration.')
+      }
+    } catch (_) {
+      toast.error('Unable to reach webhook endpoint.')
+    }
+
+    setPingingWebhook(false)
   }
 
   return (
@@ -159,6 +185,10 @@ export default function Simulate() {
             <div className="simulate-form-top">
               <Button variant="ghost" size="sm" onClick={() => setCustomizing((value) => !value)}>
                 {customizing ? 'Hide fields' : 'Customize metadata'}
+              </Button>
+              <Button variant="outline" size="sm" onClick={pingGithubWebhook} disabled={pingingWebhook}>
+                {pingingWebhook ? <Loader2 size={14} className="spin" /> : <CheckCircle2 size={14} />}
+                Test GitHub webhook
               </Button>
             </div>
 
