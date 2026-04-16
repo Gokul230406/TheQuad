@@ -15,6 +15,7 @@ from backend.guardian.risk_evaluator import RiskEvaluator
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 _risk_evaluator = RiskEvaluator()
+RISK_EVALUATION_VERSION = 4
 
 
 @router.get("/stats")
@@ -211,7 +212,7 @@ async def _refresh_event_assessment(event: PipelineEvent) -> None:
     timing_meta = risk_meta.get("timing", {}) if isinstance(risk_meta, dict) else {}
     has_timing = bool(timing_meta and timing_meta.get("estimated_seconds"))
     risk_version = int(event.metadata.get("risk_version", 0))
-    should_refresh = (risk_version < 2) or (event.risk_score is None) or (not has_timing)
+    should_refresh = (risk_version < RISK_EVALUATION_VERSION) or (event.risk_score is None) or (not has_timing)
     if not should_refresh:
         return
 
@@ -236,6 +237,6 @@ async def _refresh_event_assessment(event: PipelineEvent) -> None:
     event.risk_score = risk.get("score")
     event.risk_level = risk.get("level")
     event.metadata["risk"] = risk
-    event.metadata["risk_version"] = 2
+    event.metadata["risk_version"] = RISK_EVALUATION_VERSION
     event.update_timestamp()
     await event.save()

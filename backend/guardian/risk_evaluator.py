@@ -22,6 +22,8 @@ class RiskEvaluator:
         (r"\brm\s+-rf\s+/", 0.9, "Attempts to delete root filesystem"),
         (r"\brm\s+-rf\s+\.", 0.6, "Attempts to delete entire current directory"),
         (r"sudo\s+rm", 0.5, "Uses sudo to delete files"),
+        (r"\bsudo\b", 0.25, "Uses sudo privilege escalation"),
+        (r"/(etc|var|usr|opt|root)/", 0.25, "Touches host-level system paths"),
         (r"DROP\s+TABLE", 0.8, "Attempts to drop database table"),
         (r"DROP\s+DATABASE", 0.9, "Attempts to drop entire database"),
         (r"ALTER\s+TABLE.*DROP", 0.6, "Attempts to drop database column"),
@@ -195,9 +197,16 @@ class RiskEvaluator:
             token in script_lower
             for token in ("pip install", "npm install", "apt-get install", "curl", "wget", "sed -i", "poetry ")
         )
+        protected_branch_privileged_ops = any(
+            token in script_lower
+            for token in ("sudo ", "/etc/", "/var/", "/usr/", "/opt/", "/root/")
+        )
         if protected_branch and protected_branch_runtime_ops:
             total_score = max(total_score, 0.34)
             reasons.append("⚠️ Protected branch + runtime-impacting changes require closer review")
+        if protected_branch and protected_branch_privileged_ops:
+            total_score = max(total_score, 0.4)
+            reasons.append("⚠️ Protected branch + privileged/system-path changes are medium+ risk")
 
         # 7. LLM-estimated risk as override check
         llm_risk_raw = fix.get("estimated_risk", 0.3)

@@ -14,6 +14,7 @@ from backend.guardian.risk_evaluator import RiskEvaluator
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/approvals", tags=["approvals"])
 _risk_evaluator = RiskEvaluator()
+RISK_EVALUATION_VERSION = 4
 
 
 def get_orchestrator(request: Request):
@@ -141,7 +142,7 @@ async def _refresh_pending_assessment(approval: ApprovalRequest) -> None:
     stale_risk = approval.risk_score is None or approval.risk_score <= 0.15
     stale_timing = (approval.estimated_duration_seconds or 0.0) <= 0.0 or approval.timing_level in ("", "unknown", None)
     score_mismatch = bool(event_risk) and abs(float(event_risk.get("score", approval.risk_score or 0.0)) - float(approval.risk_score or 0.0)) > 0.001
-    should_refresh = stale_risk or stale_timing or score_mismatch or (event_risk_version < 2)
+    should_refresh = stale_risk or stale_timing or score_mismatch or (event_risk_version < RISK_EVALUATION_VERSION)
     if not should_refresh:
         return
 
@@ -175,6 +176,6 @@ async def _refresh_pending_assessment(approval: ApprovalRequest) -> None:
         event.risk_score = approval.risk_score
         event.risk_level = approval.risk_level
         event.metadata["risk"] = risk
-        event.metadata["risk_version"] = 2
+        event.metadata["risk_version"] = RISK_EVALUATION_VERSION
         event.update_timestamp()
         await event.save()

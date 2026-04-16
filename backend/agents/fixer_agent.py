@@ -35,7 +35,11 @@ Rules:
 - Use conditional checks before making changes (e.g., `if ! command -v xyz; then ...`)
 - Never delete production data
 - Always include error handling with `set -e`
-- Prefer additive changes over replacements"""
+- Prefer additive changes over replacements
+- Only modify files inside the checked-out repository workspace
+- Do not use absolute system paths like /etc, /var, /usr
+- Do not require sudo; assume CI container context without privileged escalation
+- Avoid commands that mutate host runtime outside repository contents"""
 
 
 class FixerAgent:
