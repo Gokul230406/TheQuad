@@ -1112,6 +1112,46 @@ tbody tr:nth-child(even):not(.table-click:hover) {
   padding: 12px;
 }
 
+.approvals-timing-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.approvals-timing-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.approvals-timing-value strong {
+  font-size: 14px;
+}
+
+.approvals-script-editor {
+  margin: 8px 0;
+}
+
+.approvals-script-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.approvals-code-editor {
+  width: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace;
+  background: color-mix(in srgb, var(--panel-alt) 76%, #0f1318);
+  color: color-mix(in srgb, var(--text) 88%, #c7d0db);
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  padding: 12px;
+  resize: vertical;
+  line-height: 1.45;
+}
+
 .approvals-loading-note {
   margin-top: 10px;
   color: var(--text-faint);

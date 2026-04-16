@@ -62,6 +62,13 @@ function getStatusBadgeVariant(status) {
   return 'secondary'
 }
 
+function parseApiDate(value) {
+  if (!value) return null
+  const raw = String(value)
+  const hasTimezone = /[zZ]$|[+-]\d{2}:\d{2}$/.test(raw)
+  return new Date(hasTimezone ? raw : `${raw}Z`)
+}
+
 async function buildTrendData() {
   try {
     const response = await fetch('http://localhost:8000/api/dashboard/events?page=1&limit=100')
@@ -77,7 +84,8 @@ async function buildTrendData() {
     const byDate = {}
     events.forEach((event) => {
       try {
-        const date = new Date(event.created_at)
+        const date = parseApiDate(event.created_at)
+        if (!date || Number.isNaN(date.getTime())) return
         const day = date.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
         if (!byDate[day]) byDate[day] = { failures: 0, resolved: 0 }
         byDate[day].failures += 1
@@ -384,6 +392,7 @@ export default function Dashboard() {
                     <th>Branch</th>
                     <th>Status</th>
                     <th>Risk</th>
+                    <th>ETA</th>
                     <th>Created</th>
                   </tr>
                 </thead>
@@ -410,7 +419,18 @@ export default function Dashboard() {
                           </Badge>
                         ) : '-'}
                       </td>
-                      <td>{formatDistanceToNow(new Date(event.created_at), { addSuffix: true })}</td>
+                      <td>
+                        {event.estimated_duration_seconds
+                          ? `${Math.round(event.estimated_duration_seconds)}s`
+                          : '-'}
+                      </td>
+                      <td>
+                        {(() => {
+                          const createdAt = parseApiDate(event.created_at)
+                          if (!createdAt || Number.isNaN(createdAt.getTime())) return '-'
+                          return formatDistanceToNow(createdAt, { addSuffix: true })
+                        })()}
+                      </td>
                     </tr>
                   ))}
                 </tbody>

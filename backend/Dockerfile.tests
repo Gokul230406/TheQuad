@@ -1,0 +1,18 @@
+FROM python:3.11-slim
+
+WORKDIR /workspace
+
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt /workspace/backend/requirements.txt
+RUN pip install --no-cache-dir -r /workspace/backend/requirements.txt
+
+COPY . /workspace/backend
+
+ENV PYTHONPATH=/workspace
+ENV MONGODB_URL=mongodb://localhost:27017
+
+CMD ["python", "-m", "pytest", "-q", "backend/tests/test_risk_evaluator.py"]

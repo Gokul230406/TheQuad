@@ -72,6 +72,51 @@ class RiskEvaluator:
         "manual": 0.4,
     }
 
+    # Commands that are usually valid but can still impact runtime behavior/state.
+    OPERATIONAL_PATTERNS = [
+        (r"\bsed\b.*\s-i\b", 0.18, "Performs in-place file modifications"),
+        (r"\b(tee|cat)\b.*>\s*[^>\n]+", 0.14, "Writes configuration/content into files"),
+        (r"\bmv\b\s+[^\n]+", 0.1, "Moves or renames files"),
+        (r"\bcp\b\s+[^\n]+", 0.08, "Copies files in repository"),
+        (r"\b(git\s+checkout|git\s+commit)\b", 0.14, "Mutates repository state"),
+        (r"\b(docker\s+compose|docker\s+build|docker\s+run)\b", 0.12, "Touches container build/runtime behavior"),
+        (r"\b(terraform\s+apply|kubectl\s+apply)\b", 0.25, "Applies infra/environment changes"),
+    ]
+
+    TIMING_PATTERNS = [
+        (r"\b(pip|pip3)\s+install\b", 18.0, "Python dependency installation"),
+        (r"\bnpm\s+(ci|install)\b", 24.0, "Node dependency installation"),
+        (r"\bapt(-get)?\s+install\b", 20.0, "OS package installation"),
+        (r"\b(pytest|npm\s+test|go\s+test)\b", 14.0, "Test execution"),
+        (r"\b(npm\s+run\s+build|mvn\s+package|gradle\s+build)\b", 26.0, "Build step execution"),
+        (r"\b(curl|wget|git\s+clone)\b", 12.0, "Network/download operation"),
+        (r"\bsleep\b", 10.0, "Explicit waiting in script"),
+    ]
+
+    def _estimate_timing(self, script: str) -> dict:
+        non_empty_lines = [line for line in script.split("\n") if line.strip()]
+        estimated_seconds = 6.0 + min(len(non_empty_lines) * 1.4, 50.0)
+        reasons = [f"Baseline from {len(non_empty_lines)} executable lines"]
+
+        for pattern, delta_seconds, reason in self.TIMING_PATTERNS:
+            if re.search(pattern, script, re.IGNORECASE):
+                estimated_seconds += delta_seconds
+                reasons.append(f"+{int(delta_seconds)}s from {reason}")
+
+        estimated_seconds = round(min(max(estimated_seconds, 5.0), 360.0), 1)
+        if estimated_seconds <= 20:
+            level = "fast"
+        elif estimated_seconds <= 60:
+            level = "moderate"
+        else:
+            level = "slow"
+
+        return {
+            "estimated_seconds": estimated_seconds,
+            "level": level,
+            "reasons": reasons,
+        }
+
     def evaluate(self, fix: dict, diagnosis: dict, repo: str, branch: str) -> dict:
         """
         Return a risk report:
@@ -87,10 +132,16 @@ class RiskEvaluator:
         total_score = 0.0
 
         script = fix.get("fix_script", "")
+        script_lower = script.lower()
 
         # 1. Script pattern analysis
         script_score = 0.0
         for pattern, weight, reason in self.DANGEROUS_PATTERNS:
+            if re.search(pattern, script, re.IGNORECASE):
+                script_score += weight
+                reasons.append(f"⚠️ {reason}")
+
+        for pattern, weight, reason in self.OPERATIONAL_PATTERNS:
             if re.search(pattern, script, re.IGNORECASE):
                 script_score += weight
                 reasons.append(f"⚠️ {reason}")
@@ -112,6 +163,7 @@ class RiskEvaluator:
                 if risk >= 0.2:
                     reasons.append(f"⚠️ Targeting protected branch: {branch}")
                 break
+        protected_branch = branch_risk >= 0.2
         breakdown["branch_risk"] = branch_risk
         total_score += branch_risk * 0.3  # 30% weight
 
@@ -125,10 +177,39 @@ class RiskEvaluator:
         lines = len([l for l in script.split("\n") if l.strip()])
         complexity_score = min(lines / 50, 0.5)  # max 0.5 for very long scripts
         breakdown["complexity"] = complexity_score
+        breakdown["line_count"] = lines
         total_score += complexity_score * 0.1  # 10% weight
 
-        # 5. LLM-estimated risk as override check
-        llm_risk = fix.get("estimated_risk", 0.3)
+        # 5. Execution timing estimate (long-running scripts increase execution exposure).
+        timing = self._estimate_timing(script)
+        breakdown["estimated_duration_seconds"] = timing["estimated_seconds"]
+        if timing["level"] == "moderate":
+            total_score += 0.03
+            reasons.append("⚠️ Estimated execution time is moderate")
+        elif timing["level"] == "slow":
+            total_score += 0.08
+            reasons.append("⚠️ Estimated execution time is slow")
+
+        # 6. Guardrail for protected branches with scripts that mutate runtime or dependencies.
+        protected_branch_runtime_ops = any(
+            token in script_lower
+            for token in ("pip install", "npm install", "apt-get install", "curl", "wget", "sed -i", "poetry ")
+        )
+        if protected_branch and protected_branch_runtime_ops:
+            total_score = max(total_score, 0.34)
+            reasons.append("⚠️ Protected branch + runtime-impacting changes require closer review")
+
+        # 7. LLM-estimated risk as override check
+        llm_risk_raw = fix.get("estimated_risk", 0.3)
+        try:
+            llm_risk = float(llm_risk_raw)
+        except (TypeError, ValueError):
+            llm_risk = 0.3
+        llm_risk = min(max(llm_risk, 0.0), 1.0)
+
+        if llm_risk > 0.5:
+            reasons.append(f"⚠️ AI agent estimated elevated risk ({llm_risk:.2f})")
+        total_score = max(total_score, llm_risk * 0.7)
         if llm_risk > 0.7:
             reasons.append(f"⚠️ AI agent flagged high estimated risk ({llm_risk:.2f})")
             total_score = max(total_score, llm_risk * 0.8)
@@ -154,5 +235,6 @@ class RiskEvaluator:
             "level": level,
             "reasons": reasons,
             "breakdown": breakdown,
+            "timing": timing,
             "auto_approve": level in ("low", "medium")
         }

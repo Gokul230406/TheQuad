@@ -2,7 +2,7 @@
 Dashboard route – real-time stats and event listing.
 """
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect, Request
 from beanie.operators import In
@@ -10,9 +10,11 @@ from beanie.operators import In
 from backend.models.pipeline_event import PipelineEvent, PipelineStatus
 from backend.models.approval_request import ApprovalRequest, ApprovalStatus
 from backend.models.fix_record import FixRecord, FixStatus
+from backend.guardian.risk_evaluator import RiskEvaluator
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
+_risk_evaluator = RiskEvaluator()
 
 
 @router.get("/stats")
@@ -87,6 +89,9 @@ async def list_events(
     total = await PipelineEvent.count()
     events = await query.sort("-created_at").skip((page - 1) * limit).limit(limit).to_list()
 
+    for event in events:
+        await _refresh_event_assessment(event)
+
     return {
         "total": total,
         "page": page,
@@ -111,6 +116,8 @@ async def get_event(event_id: str):
     if not event:
         from fastapi import HTTPException
         raise HTTPException(404, "Event not found")
+
+    await _refresh_event_assessment(event)
 
     return _serialize_event(event, include_logs=True)
 
@@ -149,6 +156,9 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
 def _serialize_event(event: PipelineEvent, include_logs: bool = False) -> dict:
+    risk_meta = event.metadata.get("risk", {}) if isinstance(event.metadata, dict) else {}
+    timing_meta = risk_meta.get("timing", {}) if isinstance(risk_meta, dict) else {}
+
     data = {
         "id": str(event.id),
         "event_id": event.event_id,
@@ -163,11 +173,13 @@ def _serialize_event(event: PipelineEvent, include_logs: bool = False) -> dict:
         "proposed_fix": event.proposed_fix,
         "risk_score": event.risk_score,
         "risk_level": event.risk_level,
+        "estimated_duration_seconds": timing_meta.get("estimated_seconds"),
+        "timing_level": timing_meta.get("level"),
         "fix_applied": event.fix_applied,
         "re_run_triggered": event.re_run_triggered,
         "re_run_success": event.re_run_success,
-        "created_at": event.created_at.isoformat(),
-        "updated_at": event.updated_at.isoformat()
+        "created_at": _to_utc_iso(event.created_at),
+        "updated_at": _to_utc_iso(event.updated_at)
     }
     if include_logs:
         data["raw_logs"] = event.raw_logs
@@ -176,3 +188,54 @@ def _serialize_event(event: PipelineEvent, include_logs: bool = False) -> dict:
         data["fix_output"] = event.fix_output
         data["metadata"] = event.metadata
     return data
+
+
+def _to_utc_iso(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+async def _refresh_event_assessment(event: PipelineEvent) -> None:
+    if not isinstance(event.metadata, dict):
+        return
+
+    fix_meta = event.metadata.get("fix", {})
+    if not isinstance(fix_meta, dict):
+        fix_meta = {}
+
+    if not (fix_meta.get("fix_script") or event.fix_script):
+        return
+
+    risk_meta = event.metadata.get("risk", {}) if isinstance(event.metadata.get("risk"), dict) else {}
+    timing_meta = risk_meta.get("timing", {}) if isinstance(risk_meta, dict) else {}
+    has_timing = bool(timing_meta and timing_meta.get("estimated_seconds"))
+    risk_version = int(event.metadata.get("risk_version", 0))
+    should_refresh = (risk_version < 2) or (event.risk_score is None) or (not has_timing)
+    if not should_refresh:
+        return
+
+    diagnosis = event.metadata.get("diagnosis", {})
+    if not isinstance(diagnosis, dict):
+        diagnosis = {}
+
+    fix_payload = {
+        "fix_type": fix_meta.get("fix_type", "manual"),
+        "fix_description": fix_meta.get("fix_description") or event.proposed_fix or "",
+        "fix_script": fix_meta.get("fix_script") or event.fix_script or "",
+        "estimated_risk": fix_meta.get("estimated_risk", 0.3),
+    }
+
+    risk = _risk_evaluator.evaluate(
+        fix=fix_payload,
+        diagnosis=diagnosis,
+        repo=event.repo_full_name,
+        branch=event.branch,
+    )
+
+    event.risk_score = risk.get("score")
+    event.risk_level = risk.get("level")
+    event.metadata["risk"] = risk
+    event.metadata["risk_version"] = 2
+    event.update_timestamp()
+    await event.save()

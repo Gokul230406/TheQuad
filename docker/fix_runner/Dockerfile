@@ -5,6 +5,8 @@ RUN apt-get update && apt-get install -y \
     git \
     curl \
     wget \
+    jq \
+    sudo \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 

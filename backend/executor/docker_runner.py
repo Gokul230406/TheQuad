@@ -14,7 +14,7 @@ from backend.config import settings
 logger = logging.getLogger(__name__)
 
 
-FIX_CONTAINER_IMAGE = "pipegenie-runner:latest"
+FIX_CONTAINER_IMAGE = "pipegenie-runner:v2"
 
 
 class DockerRunner:
@@ -81,7 +81,11 @@ if [ -n "$GITHUB_TOKEN" ]; then
 fi
 
 rm -rf /workspace/repo
-git clone --depth 1 --branch "$BRANCH" "$AUTH_REPO_URL" /workspace/repo
+if ! git clone --depth 1 --branch "$BRANCH" "$AUTH_REPO_URL" /workspace/repo; then
+    echo "Branch '$BRANCH' not found on remote. Falling back to repository default branch."
+    rm -rf /workspace/repo
+    git clone --depth 1 "$AUTH_REPO_URL" /workspace/repo
+fi
 cd /workspace/repo
 
 git config user.name "$PIPEGENIE_BOT_NAME"
@@ -204,6 +208,11 @@ echo "=== Fix Script Completed ==="
                 logger.warning(
                     f"[DockerRunner] Replaced unsupported flag '{old}' with '{new}'"
                 )
+
+        # The runner container already executes as root; sudo often fails because it is absent.
+        if "sudo " in sanitized:
+            sanitized = re.sub(r"\bsudo\s+", "", sanitized)
+            logger.warning("[DockerRunner] Removed 'sudo' from generated script for container execution")
 
         return sanitized
 

@@ -140,6 +140,14 @@ Invoke-RestMethod -Uri "http://localhost:8000/api/webhook/simulate" `
   -Method POST -Body $body -ContentType "application/json"
 ```
 
+### Option C: Sample Unit Testing in Docker
+```powershell
+# Run backend sample unit tests inside a container
+docker compose --profile test run --rm backend-tests
+```
+
+This sample runs `backend/tests/test_risk_evaluator.py` and validates risk + timing logic.
+
 ---
 
 ## 🔗 Step 7 – Connect to Real GitHub (For Demo/Production)
@@ -260,7 +268,7 @@ PipeGenie learns from every failure:
 | `/api/dashboard/events/{id}` | GET | Full event details + logs |
 | `/api/dashboard/ws` | WS | Real-time WebSocket feed |
 | `/api/approvals/pending` | GET | Pending human approvals |
-| `/api/approvals/{id}/approve` | POST | Approve a fix |
+| `/api/approvals/{id}/approve` | POST | Approve a fix (supports optional `edited_fix_script`) |
 | `/api/approvals/{id}/reject` | POST | Reject a fix |
 | `/health` | GET | Health check |
 | `/docs` | GET | Interactive API docs (Swagger) |

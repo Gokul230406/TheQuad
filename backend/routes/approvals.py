@@ -2,16 +2,18 @@
 Approvals route – human-in-the-loop approval interface.
 """
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Request, Depends
 from pydantic import BaseModel
 
 from backend.models.approval_request import ApprovalRequest, ApprovalStatus
 from backend.models.pipeline_event import PipelineEvent
+from backend.guardian.risk_evaluator import RiskEvaluator
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/approvals", tags=["approvals"])
+_risk_evaluator = RiskEvaluator()
 
 
 def get_orchestrator(request: Request):
@@ -21,6 +23,7 @@ def get_orchestrator(request: Request):
 class ApprovalAction(BaseModel):
     reviewer: str = "admin"
     note: Optional[str] = ""
+    edited_fix_script: Optional[str] = None
 
 
 @router.get("/pending")
@@ -29,6 +32,10 @@ async def list_pending_approvals():
     approvals = await ApprovalRequest.find(
         ApprovalRequest.status == ApprovalStatus.PENDING
     ).sort("-created_at").to_list()
+
+    # Re-score with the latest rules so older pending approvals don't stay stale.
+    for approval in approvals:
+        await _refresh_pending_assessment(approval)
 
     return {
         "total": len(approvals),
@@ -56,7 +63,8 @@ async def approve_fix(
         await orchestrator.execute_approved_fix(
             approval_id=approval_id,
             reviewer=action.reviewer,
-            note=action.note
+            note=action.note,
+            edited_fix_script=action.edited_fix_script,
         )
         return {"status": "approved", "message": "Fix approved and executing..."}
     except ValueError as e:
@@ -104,10 +112,69 @@ def _serialize_approval(a: ApprovalRequest) -> dict:
         "risk_score": a.risk_score,
         "risk_level": a.risk_level,
         "risk_reasons": a.risk_reasons,
+        "estimated_duration_seconds": a.estimated_duration_seconds,
+        "timing_level": a.timing_level,
+        "timing_reasons": a.timing_reasons,
         "status": a.status,
         "reviewer_note": a.reviewer_note,
         "reviewed_by": a.reviewed_by,
-        "reviewed_at": a.reviewed_at.isoformat() if a.reviewed_at else None,
-        "expires_at": a.expires_at.isoformat() if a.expires_at else None,
-        "created_at": a.created_at.isoformat()
+        "reviewed_at": _to_utc_iso(a.reviewed_at) if a.reviewed_at else None,
+        "expires_at": _to_utc_iso(a.expires_at) if a.expires_at else None,
+        "created_at": _to_utc_iso(a.created_at)
     }
+
+
+def _to_utc_iso(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+async def _refresh_pending_assessment(approval: ApprovalRequest) -> None:
+    if approval.status != ApprovalStatus.PENDING:
+        return
+
+    event = await PipelineEvent.get(approval.event_id)
+    event_risk = event.metadata.get("risk", {}) if event and isinstance(event.metadata, dict) and isinstance(event.metadata.get("risk"), dict) else {}
+    event_risk_version = int(event.metadata.get("risk_version", 0)) if event and isinstance(event.metadata, dict) else 0
+
+    stale_risk = approval.risk_score is None or approval.risk_score <= 0.15
+    stale_timing = (approval.estimated_duration_seconds or 0.0) <= 0.0 or approval.timing_level in ("", "unknown", None)
+    score_mismatch = bool(event_risk) and abs(float(event_risk.get("score", approval.risk_score or 0.0)) - float(approval.risk_score or 0.0)) > 0.001
+    should_refresh = stale_risk or stale_timing or score_mismatch or (event_risk_version < 2)
+    if not should_refresh:
+        return
+
+    fix_meta = event.metadata.get("fix", {}) if event and isinstance(event.metadata, dict) else {}
+    diagnosis = event.metadata.get("diagnosis", {}) if event and isinstance(event.metadata, dict) else {}
+
+    fix_payload = {
+        "fix_type": fix_meta.get("fix_type", "manual"),
+        "fix_description": fix_meta.get("fix_description") or approval.proposed_fix,
+        "fix_script": fix_meta.get("fix_script") or approval.fix_script,
+        "estimated_risk": fix_meta.get("estimated_risk", 0.3),
+    }
+
+    risk = _risk_evaluator.evaluate(
+        fix=fix_payload,
+        diagnosis=diagnosis if isinstance(diagnosis, dict) else {},
+        repo=approval.repo_full_name,
+        branch=approval.branch,
+    )
+
+    timing = risk.get("timing", {}) if isinstance(risk, dict) else {}
+    approval.risk_score = risk.get("score", approval.risk_score)
+    approval.risk_level = risk.get("level", approval.risk_level)
+    approval.risk_reasons = risk.get("reasons", approval.risk_reasons)
+    approval.estimated_duration_seconds = float(timing.get("estimated_seconds", 0.0) or 0.0)
+    approval.timing_level = timing.get("level", "unknown")
+    approval.timing_reasons = timing.get("reasons", [])
+    await approval.save()
+
+    if event:
+        event.risk_score = approval.risk_score
+        event.risk_level = approval.risk_level
+        event.metadata["risk"] = risk
+        event.metadata["risk_version"] = 2
+        event.update_timestamp()
+        await event.save()

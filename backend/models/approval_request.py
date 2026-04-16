@@ -23,6 +23,9 @@ class ApprovalRequest(Document):
     risk_score: float
     risk_level: str
     risk_reasons: list[str] = Field(default_factory=list)
+    estimated_duration_seconds: float = 0.0
+    timing_level: str = "unknown"
+    timing_reasons: list[str] = Field(default_factory=list)
     status: ApprovalStatus = ApprovalStatus.PENDING
     reviewer_note: Optional[str] = None
     reviewed_by: Optional[str] = None

@@ -25,12 +25,20 @@ function riskVariant(level) {
   return 'warning'
 }
 
+function parseApiDate(value) {
+  if (!value) return null
+  const raw = String(value)
+  const hasTimezone = /[zZ]$|[+-]\d{2}:\d{2}$/.test(raw)
+  return new Date(hasTimezone ? raw : `${raw}Z`)
+}
+
 function ApprovalItem({ approval, onApprove, onReject, onLoadDetails }) {
   const [expanded, setExpanded] = useState(false)
   const [note, setNote] = useState('')
   const [loading, setLoading] = useState(false)
   const [details, setDetails] = useState(null)
   const [detailsLoading, setDetailsLoading] = useState(false)
+  const [scriptDraft, setScriptDraft] = useState(approval.fix_script || '')
 
   useEffect(() => {
     let active = true
@@ -52,9 +60,13 @@ function ApprovalItem({ approval, onApprove, onReject, onLoadDetails }) {
 
   const entry = details || approval
 
+  useEffect(() => {
+    setScriptDraft(entry.fix_script || '')
+  }, [entry.fix_script])
+
   async function handleApprove() {
     setLoading(true)
-    await onApprove(approval.id, note)
+    await onApprove(approval.id, note, scriptDraft)
     setLoading(false)
   }
 
@@ -65,6 +77,7 @@ function ApprovalItem({ approval, onApprove, onReject, onLoadDetails }) {
   }
 
   const riskPct = Math.round((entry.risk_score || 0) * 100)
+  const estimatedDuration = Math.round(entry.estimated_duration_seconds || 0)
 
   return (
     <Card className="approvals-item">
@@ -84,7 +97,11 @@ function ApprovalItem({ approval, onApprove, onReject, onLoadDetails }) {
             </Badge>
             <span>
               <Clock3 size={12} />
-              {formatDistanceToNow(new Date(entry.created_at), { addSuffix: true })}
+              {(() => {
+                const createdAt = parseApiDate(entry.created_at)
+                if (!createdAt || Number.isNaN(createdAt.getTime())) return 'unknown'
+                return formatDistanceToNow(createdAt, { addSuffix: true })
+              })()}
             </span>
           </div>
         </div>
@@ -108,6 +125,25 @@ function ApprovalItem({ approval, onApprove, onReject, onLoadDetails }) {
           <Progress value={riskPct} />
         </div>
 
+        <div className="approvals-timing-row">
+          <span className="approvals-label">Estimated execution time</span>
+          <div className="approvals-timing-value">
+            <Badge variant="outline">{entry.timing_level || 'unknown'}</Badge>
+            <strong>{estimatedDuration > 0 ? `${estimatedDuration}s` : '--'}</strong>
+          </div>
+        </div>
+
+        {entry.timing_reasons?.length > 0 && (
+          <div className="approvals-risks">
+            {entry.timing_reasons.map((reason, index) => (
+              <div key={`timing-${index}`}>
+                <Clock3 size={12} />
+                <span>{reason}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
         {entry.risk_reasons?.length > 0 && (
           <div className="approvals-risks">
             {entry.risk_reasons.map((reason, index) => (
@@ -126,7 +162,28 @@ function ApprovalItem({ approval, onApprove, onReject, onLoadDetails }) {
         </Button>
 
         {expanded && detailsLoading && <div className="approvals-loading-note">Loading latest approval details...</div>}
-        {expanded && <pre className="approvals-code">{entry.fix_script || 'No script available.'}</pre>}
+        {expanded && (
+          <div className="approvals-script-editor">
+            <div className="approvals-script-head">
+              <span className="approvals-label">Proposed script (editable before approval)</span>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setScriptDraft(entry.fix_script || '')}
+                disabled={loading}
+              >
+                Reset
+              </Button>
+            </div>
+            <textarea
+              className="approvals-code-editor"
+              value={scriptDraft}
+              onChange={(e) => setScriptDraft(e.target.value)}
+              rows={10}
+              spellCheck={false}
+            />
+          </div>
+        )}
 
         <textarea
           className="ui-input"
@@ -190,12 +247,12 @@ export default function Approvals({ onCountChange }) {
     }
   }, [detailsCache])
 
-  async function handleApprove(id, note) {
+  async function handleApprove(id, note, editedFixScript) {
     try {
       const response = await fetch(`/api/approvals/${id}/approve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reviewer: 'admin', note }),
+        body: JSON.stringify({ reviewer: 'admin', note, edited_fix_script: editedFixScript }),
       })
 
       if (response.ok) {
@@ -297,6 +354,7 @@ export default function Approvals({ onCountChange }) {
                   <th>Repository</th>
                   <th>Branch</th>
                   <th>Risk</th>
+                  <th>Timing</th>
                   <th>Status</th>
                   <th>Reviewer</th>
                   <th>Date</th>
@@ -310,9 +368,16 @@ export default function Approvals({ onCountChange }) {
                     <td>
                       <Badge variant={riskVariant(item.risk_level)}>{Math.round((item.risk_score || 0) * 100)}%</Badge>
                     </td>
+                    <td>{item.estimated_duration_seconds ? `${Math.round(item.estimated_duration_seconds)}s` : '-'}</td>
                     <td>{item.status}</td>
                     <td>{item.reviewed_by || '-'}</td>
-                    <td>{formatDistanceToNow(new Date(item.created_at), { addSuffix: true })}</td>
+                    <td>
+                      {(() => {
+                        const createdAt = parseApiDate(item.created_at)
+                        if (!createdAt || Number.isNaN(createdAt.getTime())) return '-'
+                        return formatDistanceToNow(createdAt, { addSuffix: true })
+                      })()}
+                    </td>
                   </tr>
                 ))}
               </tbody>
