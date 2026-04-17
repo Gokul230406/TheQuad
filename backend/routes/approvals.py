@@ -10,11 +10,12 @@ from pydantic import BaseModel
 from backend.models.approval_request import ApprovalRequest, ApprovalStatus
 from backend.models.pipeline_event import PipelineEvent
 from backend.guardian.risk_evaluator import RiskEvaluator
+from backend.agents.log_signals import infer_failure_category_from_logs
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/approvals", tags=["approvals"])
 _risk_evaluator = RiskEvaluator()
-RISK_EVALUATION_VERSION = 4
+RISK_EVALUATION_VERSION = 6
 
 
 def get_orchestrator(request: Request):
@@ -136,18 +137,22 @@ async def _refresh_pending_assessment(approval: ApprovalRequest) -> None:
         return
 
     event = await PipelineEvent.get(approval.event_id)
-    event_risk = event.metadata.get("risk", {}) if event and isinstance(event.metadata, dict) and isinstance(event.metadata.get("risk"), dict) else {}
     event_risk_version = int(event.metadata.get("risk_version", 0)) if event and isinstance(event.metadata, dict) else 0
-
-    stale_risk = approval.risk_score is None or approval.risk_score <= 0.15
-    stale_timing = (approval.estimated_duration_seconds or 0.0) <= 0.0 or approval.timing_level in ("", "unknown", None)
-    score_mismatch = bool(event_risk) and abs(float(event_risk.get("score", approval.risk_score or 0.0)) - float(approval.risk_score or 0.0)) > 0.001
-    should_refresh = stale_risk or stale_timing or score_mismatch or (event_risk_version < RISK_EVALUATION_VERSION)
-    if not should_refresh:
-        return
 
     fix_meta = event.metadata.get("fix", {}) if event and isinstance(event.metadata, dict) else {}
     diagnosis = event.metadata.get("diagnosis", {}) if event and isinstance(event.metadata, dict) else {}
+    raw_logs = (event.raw_logs if event else "") or ""
+    log_inferred = infer_failure_category_from_logs(raw_logs)
+    root_cause_updated = False
+    if (
+        log_inferred != "unknown"
+        and approval.root_cause
+        and "unknown" in approval.root_cause.lower()
+    ):
+        approval.root_cause = (
+            f"Pipeline failure (log pattern suggests {log_inferred.replace('_', ' ')})"
+        )
+        root_cause_updated = True
 
     fix_payload = {
         "fix_type": fix_meta.get("fix_type", "manual"),
@@ -161,21 +166,31 @@ async def _refresh_pending_assessment(approval: ApprovalRequest) -> None:
         diagnosis=diagnosis if isinstance(diagnosis, dict) else {},
         repo=approval.repo_full_name,
         branch=approval.branch,
+        raw_logs=raw_logs,
     )
 
     timing = risk.get("timing", {}) if isinstance(risk, dict) else {}
+    prev_score = approval.risk_score
+    prev_level = approval.risk_level
     approval.risk_score = risk.get("score", approval.risk_score)
     approval.risk_level = risk.get("level", approval.risk_level)
     approval.risk_reasons = risk.get("reasons", approval.risk_reasons)
     approval.estimated_duration_seconds = float(timing.get("estimated_seconds", 0.0) or 0.0)
     approval.timing_level = timing.get("level", "unknown")
     approval.timing_reasons = timing.get("reasons", [])
-    await approval.save()
 
-    if event:
+    score_changed = abs(float(prev_score or 0) - float(approval.risk_score or 0)) > 1e-5
+    level_changed = (prev_level or "") != (approval.risk_level or "")
+    version_stale = event_risk_version < RISK_EVALUATION_VERSION
+    if score_changed or level_changed or version_stale or root_cause_updated:
+        await approval.save()
+
+    if event and (score_changed or level_changed or version_stale or root_cause_updated):
         event.risk_score = approval.risk_score
         event.risk_level = approval.risk_level
         event.metadata["risk"] = risk
         event.metadata["risk_version"] = RISK_EVALUATION_VERSION
+        if root_cause_updated:
+            event.root_cause = approval.root_cause
         event.update_timestamp()
         await event.save()

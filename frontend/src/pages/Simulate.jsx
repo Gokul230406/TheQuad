@@ -122,7 +122,7 @@ export default function Simulate() {
     setDiagnosisLoading(true)
     debounceTimer.current = setTimeout(async () => {
       try {
-        const response = await fetch('http://localhost:8000/api/webhook/preview-diagnosis', {
+        const response = await fetch('/api/webhook/preview-diagnosis', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -172,9 +172,10 @@ export default function Simulate() {
 
     try {
       const controller = new AbortController()
-      const timeoutId = setTimeout(() => controller.abort(), 25000)
+      // Builder may wait out Gemini 429 backoff (60s+) across retries
+      const timeoutId = setTimeout(() => controller.abort(), 180000)
 
-      const response = await fetch('http://localhost:8000/api/webhook/builder-chat', {
+      const response = await fetch('/api/webhook/builder-chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ session_id: sessionId, message: builderInput }),
@@ -187,7 +188,11 @@ export default function Simulate() {
       }
 
       const data = await response.json()
-      const assistantText = normalizeBuilderMessage(data.message)
+      const assistantText = normalizeBuilderMessage(
+        typeof data.error === 'string' && data.error && data.message === 'Failed to process message'
+          ? `${data.message}\n\n${data.error}`
+          : data.message,
+      )
       setBuilderMessages((prev) => [...prev, { role: 'assistant', content: assistantText }])
 
       if (data.ready && data.scenario) {
@@ -206,8 +211,8 @@ export default function Simulate() {
     } catch (error) {
       console.error('Builder chat failed:', error)
       const message = error?.name === 'AbortError'
-        ? 'Builder timed out after 25s. Check backend and Ollama status.'
-        : 'Builder request failed. Check backend and Ollama connection.'
+        ? 'Builder timed out after 3 minutes (Gemini may be rate-limited; wait and retry, or use Ollama). Check backend and LLM configuration.'
+        : 'Builder request failed. Check backend is up and reachable (same host/port as the API).'
       setBuilderMessages((prev) => [
         ...prev,
         { role: 'assistant', content: message },
@@ -250,7 +255,7 @@ export default function Simulate() {
     setFixPreview(null)
 
     try {
-      const response = await fetch('http://localhost:8000/api/webhook/preview-fix', {
+      const response = await fetch('/api/webhook/preview-fix', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -542,20 +547,34 @@ export default function Simulate() {
                   <div>
                     <strong style={{ fontSize: '0.9rem', color: 'var(--text-secondary)' }}>Proposed fix</strong>
                     <p style={{ margin: '4px 0 0', fontSize: '0.95rem', lineHeight: '1.5' }}>
-                      {fixPreview.proposed_fix?.description || 'No fix description available'}
+                      {fixPreview.proposed_fix?.fix_description
+                        || fixPreview.proposed_fix?.description
+                        || 'No fix description available'}
                     </p>
                   </div>
 
                   <div>
                     <strong style={{ fontSize: '0.9rem', color: 'var(--text-secondary)' }}>Risk assessment</strong>
-                    <div style={{ marginTop: '6px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <Badge variant={fixPreview.risk_assessment?.risk_level === 'high' ? 'danger' : fixPreview.risk_assessment?.risk_level === 'medium' ? 'warning' : 'success'}>
-                        {(fixPreview.risk_assessment?.risk_level || 'unknown').toUpperCase()}
+                    {(() => {
+                      const r = fixPreview.risk_assessment || {}
+                      const level = r.risk_level || r.level || 'unknown'
+                      const score = typeof r.risk_score === 'number' ? r.risk_score : r.score
+                      const scorePct = typeof score === 'number' ? Math.round(score * 100) : null
+                      const blurb = r.justification
+                        || (Array.isArray(r.reasons) ? r.reasons.map((x) => String(x).replace(/^⚠️\s*|^✅\s*/u, '')).filter(Boolean).join('; ') : '')
+                        || 'No risk details'
+                      return (
+                    <div style={{ marginTop: '6px', display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '8px' }}>
+                      <Badge variant={level === 'high' ? 'danger' : level === 'medium' ? 'warning' : 'success'}>
+                        {(level || 'unknown').toUpperCase()}
+                        {scorePct != null ? ` · ${scorePct}%` : ''}
                       </Badge>
-                      <span style={{ fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
-                        {fixPreview.risk_assessment?.justification || 'No risk details'}
+                      <span style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', flex: '1 1 220px' }}>
+                        {blurb}
                       </span>
                     </div>
+                      )
+                    })()}
                   </div>
                 </div>
               ) : (

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ChevronRight, Filter, GitBranch, Search } from 'lucide-react'
+import { ChevronRight, Filter, GitBranch, Loader2, RefreshCw, Search } from 'lucide-react'
 import { formatDistanceToNow } from 'date-fns'
 import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
@@ -23,6 +23,13 @@ function statusVariant(status) {
   if (status === 'awaiting_approval') return 'warning'
   if (status === 'failed' || status === 'failed_to_fix') return 'danger'
   return 'secondary'
+}
+
+function parseApiDate(value) {
+  if (!value) return null
+  const raw = String(value)
+  const hasTimezone = /[zZ]$|[+-]\d{2}:\d{2}$/.test(raw)
+  return new Date(hasTimezone ? raw : `${raw}Z`)
 }
 
 export default function History() {
@@ -50,8 +57,16 @@ export default function History() {
       setTotal(data.total || 0)
     } catch (_) {
       return
+    } finally {
+      setLoading(false)
     }
-    setLoading(false)
+  }
+
+  function rowKeyDown(event, id) {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault()
+      navigate(`/events/${id}`)
+    }
   }
 
   const filtered = search
@@ -84,14 +99,30 @@ export default function History() {
         </CardHeader>
         <CardContent>
           <div className="history-filters">
-            <div className="history-search-wrap">
-              <Search size={14} />
-              <input
-                className="ui-input"
-                placeholder="Search incidents"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-              />
+            <div className="history-filters-top">
+              <div className="history-search-wrap">
+                <Search size={14} />
+                <input
+                  className="ui-input"
+                  placeholder="Search incidents"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  aria-label="Search incidents"
+                />
+              </div>
+              <div className="history-toolbar-actions">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => fetchEvents()}
+                  disabled={loading}
+                  aria-label="Refresh incident list"
+                >
+                  {loading ? <Loader2 size={14} className="spin" /> : <RefreshCw size={14} />}
+                  Refresh
+                </Button>
+              </div>
             </div>
             <div className="history-pills">
               {STATUS_OPTIONS.map((status) => (
@@ -137,7 +168,15 @@ export default function History() {
                 </tr>
               ) : (
                 filtered.map((event) => (
-                  <tr key={event.id} className="table-click" onClick={() => navigate(`/events/${event.id}`)}>
+                  <tr
+                    key={event.id}
+                    className="table-click"
+                    tabIndex={0}
+                    role="link"
+                    onClick={() => navigate(`/events/${event.id}`)}
+                    onKeyDown={(e) => rowKeyDown(e, event.id)}
+                    aria-label={`Open incident ${event.repo_full_name || 'unknown'}`}
+                  >
                     <td>
                       <div className="history-repo-cell">
                         <strong>{event.repo_full_name}</strong>
@@ -150,14 +189,24 @@ export default function History() {
                         {event.branch}
                       </span>
                     </td>
-                    <td>{event.root_cause || '-'}</td>
+                    <td>
+                      <span className="history-root-cause-cell" title={event.root_cause || undefined}>
+                        {event.root_cause || '-'}
+                      </span>
+                    </td>
                     <td>
                       <Badge variant={statusVariant(event.status)}>{String(event.status || 'unknown').replace(/_/g, ' ')}</Badge>
                     </td>
                     <td>{event.risk_level || '-'}</td>
-                    <td>{formatDistanceToNow(new Date(event.created_at), { addSuffix: true })}</td>
                     <td>
-                      <ChevronRight size={14} />
+                      {(() => {
+                        const createdAt = parseApiDate(event.created_at)
+                        if (!createdAt || Number.isNaN(createdAt.getTime())) return '-'
+                        return formatDistanceToNow(createdAt, { addSuffix: true })
+                      })()}
+                    </td>
+                    <td>
+                      <ChevronRight size={14} aria-hidden />
                     </td>
                   </tr>
                 ))

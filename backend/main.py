@@ -2,13 +2,17 @@
 PipeGenie – FastAPI Backend Entry Point
 """
 import logging
+import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from beanie import init_beanie
 import redis.asyncio as redis
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 from backend.config import settings
 from backend.models.pipeline_event import PipelineEvent
@@ -17,6 +21,7 @@ from backend.models.fix_record import FixRecord
 from backend.routes import webhook, approvals, dashboard
 from backend.agents.orchestrator import AgentOrchestrator
 from backend.services.websocket_manager import WebSocketManager
+from backend.telemetry import init_tracer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -55,6 +60,11 @@ async def lifespan(app: FastAPI):
     # Init Agent Orchestrator
     orchestrator = AgentOrchestrator(ws_manager=ws_manager)
     app.state.orchestrator = orchestrator
+    app.state.component_status = {
+        "mongodb": "connected",
+        "redis": "connected" if app.state.redis else "unavailable",
+        "ollama": settings.OLLAMA_BASE_URL if settings.USE_OLLAMA else "mistral-api",
+    }
     logger.info("✅ Agent Orchestrator ready")
 
     logger.info("🚀 PipeGenie is live!")
@@ -67,12 +77,64 @@ async def lifespan(app: FastAPI):
     logger.info("👋 PipeGenie shut down")
 
 
+init_tracer()
+
 app = FastAPI(
     title="PipeGenie API",
     description="AI-powered CI/CD pipeline auto-remediation system",
     version=settings.APP_VERSION,
     lifespan=lifespan
 )
+
+FastAPIInstrumentor.instrument_app(app)
+
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    request.state.request_id = request_id
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
+    return response
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    request_id = getattr(request.state, "request_id", "unknown")
+    logger.warning(
+        "Validation error request_id=%s path=%s errors=%s",
+        request_id,
+        request.url.path,
+        exc.errors(),
+    )
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": "validation_error",
+            "message": "Request body validation failed",
+            "request_id": request_id,
+            "details": exc.errors(),
+        },
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    request_id = getattr(request.state, "request_id", "unknown")
+    logger.exception(
+        "Unhandled error request_id=%s path=%s method=%s",
+        request_id,
+        request.url.path,
+        request.method,
+    )
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "internal_server_error",
+            "message": "Unexpected server error. Check backend logs with request_id.",
+            "request_id": request_id,
+        },
+    )
 
 # CORS
 app.add_middleware(
@@ -101,11 +163,16 @@ async def root():
 
 @app.get("/health")
 async def health():
+    component_status = getattr(app.state, "component_status", {})
+    redis_status = "connected" if app.state.redis else "unavailable"
+    if component_status:
+        component_status["redis"] = redis_status
     return {
         "status": "healthy",
         "mongodb": "connected",
-        "redis": "connected" if app.state.redis else "unavailable",
-        "ollama": settings.OLLAMA_BASE_URL if settings.USE_OLLAMA else "mistral-api"
+        "redis": redis_status,
+        "ollama": settings.OLLAMA_BASE_URL if settings.USE_OLLAMA else "mistral-api",
+        "components": component_status,
     }
 
 

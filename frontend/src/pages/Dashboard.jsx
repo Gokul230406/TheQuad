@@ -71,7 +71,7 @@ function parseApiDate(value) {
 
 async function buildTrendData() {
   try {
-    const response = await fetch('http://localhost:8000/api/dashboard/events?page=1&limit=100')
+    const response = await fetch('/api/dashboard/events?page=1&limit=100')
     const data = await response.json()
     const events = data.events || []
 
@@ -98,8 +98,6 @@ async function buildTrendData() {
     // Return all dates with data (not just last 7), sorted
     const result = Object.entries(byDate)
       .map(([day, counts]) => ({ day, ...counts }))
-    
-    console.log('Chart data:', result)
     return result
   } catch (e) {
     console.error('Failed to build trend data:', e)
@@ -134,9 +132,9 @@ export default function Dashboard() {
   async function fetchData() {
     try {
       const [statsRes, eventsRes, reposRes] = await Promise.all([
-        fetch('http://localhost:8000/api/dashboard/stats'),
-        fetch('http://localhost:8000/api/dashboard/events?page=1&limit=8'),
-        fetch('http://localhost:8000/api/dashboard/repositories'),
+        fetch('/api/dashboard/stats'),
+        fetch('/api/dashboard/events?page=1&limit=8'),
+        fetch('/api/dashboard/repositories'),
       ])
       const statsData = await statsRes.json()
       const eventsData = await eventsRes.json()
@@ -165,6 +163,7 @@ export default function Dashboard() {
 
   const successRate = stats?.success_rate ?? 0
   const unresolvedCount = (stats?.total_events ?? 0) - (stats?.fixed ?? 0)
+  const degradedComponents = stats?.degraded_components || []
 
   const metricCards = [
     {
@@ -261,7 +260,7 @@ export default function Dashboard() {
               <BarChart3 size={16} />
               Remediation trend
             </CardTitle>
-            <CardDescription>Failures versus resolved incidents over the past 7 days.</CardDescription>
+            <CardDescription>Failures versus resolved incidents, grouped by day from recent events.</CardDescription>
           </CardHeader>
           <CardContent>
             <div className="dashboard-chart-legend">
@@ -336,6 +335,14 @@ export default function Dashboard() {
       <div className="dashboard-health-strip">
         <span>Unresolved incidents</span>
         <strong>{Math.max(0, unresolvedCount)}</strong>
+      </div>
+      <div className="dashboard-health-strip">
+        <span>Platform components</span>
+        <strong>
+          {degradedComponents.length
+            ? `Degraded: ${degradedComponents.join(', ')}`
+            : 'All core services healthy'}
+        </strong>
       </div>
 
       <Card>

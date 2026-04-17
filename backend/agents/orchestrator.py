@@ -13,6 +13,7 @@ from backend.models.pipeline_event import PipelineEvent, PipelineStatus, Failure
 from backend.models.approval_request import ApprovalRequest, ApprovalStatus
 from backend.models.fix_record import FixRecord, FixStatus
 from backend.services.github_service import GitHubService
+from backend.services.verification_service import VerificationService
 from backend.agents.vector_store import VectorStore
 from backend.config import settings
 
@@ -26,6 +27,7 @@ class AgentOrchestrator:
         self.risk_evaluator = RiskEvaluator()
         self.docker_runner = DockerRunner()
         self.github_service = GitHubService()
+        self.verification_service = VerificationService()
         self.vector_store = VectorStore()
         self.ws_manager = ws_manager  # WebSocket broadcast manager
 
@@ -124,7 +126,8 @@ class AgentOrchestrator:
                 fix=fix,
                 diagnosis=diagnosis,
                 repo=event.repo_full_name,
-                branch=event.branch
+                branch=event.branch,
+                raw_logs=event.raw_logs or "",
             )
 
             event.risk_score = risk["score"]
@@ -173,12 +176,14 @@ class AgentOrchestrator:
         await self._broadcast("fix_applying", event)
 
         # Execute in Docker
+        is_simulated_event = bool(event.metadata.get("simulated")) or str(event.event_id).startswith("sim-")
         result = await self.docker_runner.run_fix(
             fix_script=fix.get("fix_script", ""),
             repo_url=f"https://github.com/{event.repo_full_name}",
             branch=event.branch,
             event_id=str(event.id),
             repo_full_name=event.repo_full_name,
+            simulated=is_simulated_event,
         )
 
         # Save fix record
@@ -263,6 +268,10 @@ class AgentOrchestrator:
 
         await event.save()
         await self._broadcast("fix_complete", event, extra={"result": result})
+        # Only run post-flow verification when a fix actually succeeded.
+        # This avoids adding verification noise to failed remediation attempts.
+        if event.status == PipelineStatus.FIXED:
+            self._schedule_post_flow_verification(event.id)
 
     async def _request_approval(self, event: PipelineEvent, fix: dict, risk: dict):
         """Create an approval request for a generated fix."""
@@ -345,6 +354,7 @@ class AgentOrchestrator:
                     diagnosis=diagnosis,
                     repo=event.repo_full_name,
                     branch=event.branch,
+                    raw_logs=event.raw_logs or "",
                 )
 
                 event.fix_script = edited_value
@@ -429,3 +439,83 @@ class AgentOrchestrator:
             if extra:
                 payload.update(extra)
             await self.ws_manager.broadcast(payload)
+
+    def _schedule_post_flow_verification(self, event_id):
+        """Run Docker verification in the background; never swallow failures silently."""
+
+        async def _run():
+            try:
+                await self._run_verification(event_id)
+            except Exception:
+                logger.exception(
+                    "[Orchestrator] Post-flow verification crashed for event db_id=%s",
+                    event_id,
+                )
+
+        try:
+            asyncio.get_running_loop().create_task(_run())
+        except RuntimeError:
+            logger.warning(
+                "[Orchestrator] No running event loop; skipping verification schedule db_id=%s",
+                event_id,
+            )
+
+    async def _run_verification(self, event_id):
+        lookup = str(event_id) if event_id is not None else None
+        event = None
+        if lookup:
+            try:
+                event = await PipelineEvent.get(lookup)
+            except Exception:
+                event = None
+        if not event and event_id is not None:
+            try:
+                event = await PipelineEvent.get(event_id)
+            except Exception:
+                event = None
+        if not event:
+            logger.warning(
+                "[Orchestrator] verification: PipelineEvent not found for db_id=%s",
+                event_id,
+            )
+            return
+        if event.status != PipelineStatus.FIXED:
+            logger.info(
+                "[Orchestrator] verification: skip (status=%s, db_id=%s)",
+                event.status,
+                event_id,
+            )
+            return
+
+        await self._append_timeline(
+            event,
+            "verification_started",
+            "Post-flow Docker verification started",
+        )
+        await event.save()
+        await self._broadcast("verification_started", event)
+
+        verification = await self.verification_service.run()
+        passed = bool(
+            verification.get("passed")
+            or (
+                verification.get("exit_code") == 0
+                and not verification.get("timed_out")
+            )
+        )
+        verification_out = {**verification, "passed": passed, "status": "passed" if passed else verification.get("status")}
+        event.metadata["verification"] = verification_out
+        await self._append_timeline(
+            event,
+            "verification_complete",
+            verification_out.get("message", "Post-flow verification completed"),
+            details={
+                "status": verification_out.get("status"),
+                "exit_code": verification_out.get("exit_code"),
+                "timed_out": verification_out.get("timed_out"),
+                "passed": passed,
+            },
+        )
+        event.update_timestamp()
+        await event.save()
+        await self._broadcast("verification_complete", event, extra={"verification": verification_out})

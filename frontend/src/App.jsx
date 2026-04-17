@@ -1,12 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { BrowserRouter, NavLink, Route, Routes } from 'react-router-dom'
+import { BrowserRouter, NavLink, Route, Routes, useLocation } from 'react-router-dom'
+import toast from 'react-hot-toast'
 import {
   Activity,
   BookOpen,
-  Circle,
   FlaskConical,
   History as HistoryIcon,
   LayoutDashboard,
+  LineChart,
   Moon,
   Sun,
   ShieldAlert,
@@ -18,11 +19,76 @@ import Approvals from './pages/Approvals.jsx'
 import History from './pages/History.jsx'
 import Simulate from './pages/Simulate.jsx'
 import EventDetail from './pages/EventDetail.jsx'
+import { verificationRecordPassed, verificationRecordSkipped } from './utils/verification.js'
 
-const WS_URL = 'ws://localhost:8000/api/dashboard/ws'
 const BACKEND_BASE_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000'
 
+function getDashboardWsUrl() {
+  const configured = import.meta.env.VITE_BACKEND_URL
+  if (configured) {
+    try {
+      const u = new URL(configured)
+      u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:'
+      u.pathname = '/api/dashboard/ws'
+      u.search = ''
+      u.hash = ''
+      return u.toString()
+    } catch {
+      /* use same-origin below */
+    }
+  }
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  return `${proto}//${window.location.host}/api/dashboard/ws`
+}
+
+function verificationOutcome(msg) {
+  const v = msg?.verification
+  return {
+    passed: verificationRecordPassed(v),
+    skipped: verificationRecordSkipped(v),
+  }
+}
+/** Observability UI (SigNoz: logs/traces). Default :8080; override with VITE_LOGS_UI_URL or VITE_SIGNOZ_URL. */
+const LOGS_UI_URL = import.meta.env.VITE_LOGS_UI_URL || import.meta.env.VITE_SIGNOZ_URL || 'http://localhost:8080'
+
 export const WSContext = React.createContext(null)
+
+function routeHeadline(pathname) {
+  if (pathname === '/') {
+    return {
+      title: 'Operations overview',
+      subtitle: 'Live reliability telemetry, guarded remediation workflows, and incident audit trails.',
+    }
+  }
+  if (pathname === '/approvals') {
+    return {
+      title: 'Approvals',
+      subtitle: 'Review proposed fixes, adjust scripts if needed, and approve execution.',
+    }
+  }
+  if (pathname === '/history') {
+    return {
+      title: 'Incident history',
+      subtitle: 'Search and filter past failures and remediation outcomes.',
+    }
+  }
+  if (pathname === '/simulate') {
+    return {
+      title: 'Failure simulator',
+      subtitle: 'Inject controlled CI incidents to validate the end-to-end pipeline.',
+    }
+  }
+  if (pathname.startsWith('/events/')) {
+    return {
+      title: 'Incident detail',
+      subtitle: 'Diagnosis, fix plan, timeline, and logs for a single pipeline event.',
+    }
+  }
+  return {
+    title: 'PipeGenie',
+    subtitle: 'Reliability operations console.',
+  }
+}
 
 function Sidebar({ pendingCount, liveCount, wsConnected, theme, onToggleTheme, backendInfo }) {
   const navItems = [
@@ -93,24 +159,29 @@ function Sidebar({ pendingCount, liveCount, wsConnected, theme, onToggleTheme, b
             {backendInfo.name || 'PipeGenie'} {backendInfo.version || 'unknown'}
           </small>
         </div>
+        <div className="sidebar-stack-row" aria-label="Data services">
+          <div className="sidebar-stack-item">
+            <span className={`sidebar-backend-dot ${backendInfo.mongo === 'connected' ? 'ok' : 'warn'}`} />
+            <span>MongoDB</span>
+          </div>
+          <div className="sidebar-stack-item">
+            <span className={`sidebar-backend-dot ${backendInfo.redis === 'connected' ? 'ok' : 'warn'}`} />
+            <span>Redis</span>
+          </div>
+        </div>
       </div>
     </aside>
   )
 }
 
-function OpsToolbar({ backendInfo, wsConnected }) {
+function OpsToolbar({ headline }) {
   return (
     <header className="ops-toolbar">
       <div className="ops-toolbar-title">
-        <h2>Operations Command Surface</h2>
-        <p>Live reliability telemetry, guarded remediation workflows, and incident audit trails.</p>
+        <h2>{headline.title}</h2>
+        <p>{headline.subtitle}</p>
       </div>
       <div className="ops-toolbar-meta">
-        <div className="ops-chip">
-          <Circle size={10} className={backendInfo.healthy ? 'ops-chip-dot-ok' : 'ops-chip-dot-warn'} />
-          Backend {backendInfo.healthy ? 'healthy' : 'unavailable'}
-        </div>
-        <div className="ops-chip">WS {wsConnected ? 'connected' : 'reconnecting'}</div>
         <a className="ops-link" href={`${BACKEND_BASE_URL}/`} target="_blank" rel="noreferrer">
           API root
         </a>
@@ -118,8 +189,54 @@ function OpsToolbar({ backendInfo, wsConnected }) {
           <BookOpen size={13} />
           Docs
         </a>
+        <a
+          className="ops-link"
+          href={LOGS_UI_URL}
+          target="_blank"
+          rel="noreferrer"
+          title="Opens the logs UI (SigNoz). Run .\\start-signoz.ps1 first. Local dev login: admin@pipegenie.local / admin. Override URL with VITE_LOGS_UI_URL."
+        >
+          <LineChart size={13} />
+          Logs
+        </a>
       </div>
     </header>
+  )
+}
+
+function AppShellRoutes({
+  backendInfo,
+  pendingCount,
+  liveCount,
+  wsConnected,
+  theme,
+  onToggleTheme,
+  setPendingCount,
+}) {
+  const location = useLocation()
+  const headline = routeHeadline(location.pathname)
+
+  return (
+    <>
+      <Sidebar
+        pendingCount={pendingCount}
+        liveCount={liveCount}
+        wsConnected={wsConnected}
+        theme={theme}
+        onToggleTheme={onToggleTheme}
+        backendInfo={backendInfo}
+      />
+      <main className="app-main">
+        <OpsToolbar headline={headline} />
+        <Routes>
+          <Route path="/" element={<Dashboard />} />
+          <Route path="/approvals" element={<Approvals onCountChange={setPendingCount} />} />
+          <Route path="/history" element={<History />} />
+          <Route path="/simulate" element={<Simulate />} />
+          <Route path="/events/:id" element={<EventDetail />} />
+        </Routes>
+      </main>
+    </>
   )
 }
 
@@ -132,9 +249,13 @@ export default function App() {
     healthy: false,
     name: 'PipeGenie',
     version: 'unknown',
+    mongo: 'unknown',
+    redis: 'unknown',
   })
   const wsRef = useRef(null)
   const pingIntervalRef = useRef(null)
+  const reconnectTimeoutRef = useRef(null)
+  const shouldReconnectRef = useRef(true)
   const [theme, setTheme] = useState(() => {
     const storedTheme = localStorage.getItem('pg-theme')
     if (storedTheme === 'light' || storedTheme === 'dark') return storedTheme
@@ -147,6 +268,7 @@ export default function App() {
   }, [theme])
 
   useEffect(() => {
+    shouldReconnectRef.current = true
     connectWS()
     fetchPendingCount()
     fetchBackendInfo()
@@ -154,21 +276,32 @@ export default function App() {
     const healthInterval = setInterval(fetchBackendInfo, 30000)
 
     return () => {
+      shouldReconnectRef.current = false
       if (pingIntervalRef.current) {
         clearInterval(pingIntervalRef.current)
+        pingIntervalRef.current = null
+      }
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current)
+        reconnectTimeoutRef.current = null
       }
       clearInterval(healthInterval)
       wsRef.current?.close()
+      wsRef.current = null
     }
   }, [])
 
   function connectWS() {
     try {
-      const ws = new WebSocket(WS_URL)
+      const ws = new WebSocket(getDashboardWsUrl())
       wsRef.current = ws
 
       ws.onopen = () => {
         setWsConnected(true)
+        if (reconnectTimeoutRef.current) {
+          clearTimeout(reconnectTimeoutRef.current)
+          reconnectTimeoutRef.current = null
+        }
 
         if (pingIntervalRef.current) {
           clearInterval(pingIntervalRef.current)
@@ -199,6 +332,27 @@ export default function App() {
           if (msg.type === 'fix_rejected' || msg.type === 'fix_complete') {
             setPendingCount((count) => Math.max(0, count - 1))
           }
+
+          if (msg.type === 'verification_started') {
+            toast('Post-fix Docker verification started.', { icon: '🧪' })
+          }
+
+          if (msg.type === 'verification_complete') {
+            const { passed, skipped } = verificationOutcome(msg)
+            const baseId = `verify-${msg.event_id || 'unknown'}`
+            if (passed) {
+              toast.success('Verification passed: tests succeeded.', { id: `${baseId}-ok` })
+            } else if (skipped) {
+              toast('Post-fix Docker verification is disabled (skipped).', {
+                id: `${baseId}-skip`,
+                icon: '\u23ED\uFE0F',
+              })
+            } else {
+              toast.error('Verification failed: check test output in event details.', {
+                id: `${baseId}-fail`,
+              })
+            }
+          }
         } catch (_) {
           return
         }
@@ -210,7 +364,8 @@ export default function App() {
           clearInterval(pingIntervalRef.current)
           pingIntervalRef.current = null
         }
-        setTimeout(connectWS, 3000)
+        if (!shouldReconnectRef.current) return
+        reconnectTimeoutRef.current = setTimeout(connectWS, 3000)
       }
 
       ws.onerror = () => ws.close()
@@ -243,9 +398,16 @@ export default function App() {
         healthy: health?.status === 'healthy',
         name: root?.name || 'PipeGenie',
         version: root?.version || 'unknown',
+        mongo: health?.mongodb === 'connected' ? 'connected' : 'unavailable',
+        redis: health?.redis === 'connected' ? 'connected' : 'unavailable',
       })
     } catch (_) {
-      setBackendInfo((prev) => ({ ...prev, healthy: false }))
+      setBackendInfo((prev) => ({
+        ...prev,
+        healthy: false,
+        mongo: 'unavailable',
+        redis: 'unavailable',
+      }))
     }
   }
 
@@ -253,24 +415,15 @@ export default function App() {
     <WSContext.Provider value={{ wsMessages, wsConnected }}>
       <BrowserRouter>
         <div className="app-shell">
-          <Sidebar
+          <AppShellRoutes
+            backendInfo={backendInfo}
             pendingCount={pendingCount}
             liveCount={liveCount}
             wsConnected={wsConnected}
             theme={theme}
             onToggleTheme={() => setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'))}
-            backendInfo={backendInfo}
+            setPendingCount={setPendingCount}
           />
-          <main className="app-main">
-            <OpsToolbar backendInfo={backendInfo} wsConnected={wsConnected} />
-            <Routes>
-              <Route path="/" element={<Dashboard />} />
-              <Route path="/approvals" element={<Approvals onCountChange={setPendingCount} />} />
-              <Route path="/history" element={<History />} />
-              <Route path="/simulate" element={<Simulate />} />
-              <Route path="/events/:id" element={<EventDetail />} />
-            </Routes>
-          </main>
         </div>
       </BrowserRouter>
     </WSContext.Provider>

@@ -6,10 +6,10 @@ import logging
 import re
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_community.chat_models import ChatOllama
-from langchain_mistralai import ChatMistralAI
 
 from backend.config import settings
+from backend.agents.llm_factory import build_chat_llm
+from backend.agents.llm_retry import chat_invoke_with_retry
 from backend.agents.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
@@ -48,19 +48,7 @@ class FixerAgent:
         self._init_llm()
 
     def _init_llm(self):
-        if settings.USE_OLLAMA:
-            self.llm = ChatOllama(
-                model=settings.LLM_MODEL,
-                base_url=settings.OLLAMA_BASE_URL,
-                temperature=0.2,
-                format="json"
-            )
-        else:
-            self.llm = ChatMistralAI(
-                model="mistral-large-latest",
-                api_key=settings.MISTRAL_API_KEY,
-                temperature=0.2
-            )
+        self.llm = build_chat_llm(temperature=0.2, json_mode=True)
 
     async def generate_fix(self, diagnosis: dict, repo: str, branch: str,
                            raw_logs: str) -> dict:
@@ -104,7 +92,7 @@ Generate a safe, executable fix script for this CI/CD pipeline failure.
         ]
 
         try:
-            response = self.llm.invoke(messages)
+            response = await chat_invoke_with_retry(self.llm, messages)
             result = self._parse_json_response(response.content)
         except Exception as e:
             logger.error(f"FixerAgent LLM failed: {e}")

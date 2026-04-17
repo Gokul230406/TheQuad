@@ -2,11 +2,13 @@
 Guardian – Risk Evaluator Module
 Scores the risk of a proposed fix using multi-factor analysis.
 """
+import hashlib
 import logging
 import re
 from typing import List
 
 from backend.config import settings
+from backend.agents.log_signals import infer_failure_category_from_logs
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +76,28 @@ class RiskEvaluator:
         "manual": 0.4,
     }
 
+    # LLM / diagnosis often use *_error; map to fix-type weights above.
+    FIX_TYPE_ALIASES = {
+        "dependency_error": "dependency",
+        "test_failure": "test",
+        "build_error": "build",
+        "config_error": "config",
+        "network_error": "network",
+        "permissions_error": "permissions",
+        "unknown": "manual",
+    }
+
+    # How much unresolved failure severity should move the needle (on top of script/branch).
+    FAILURE_CATEGORY_WEIGHT = {
+        "dependency_error": 0.04,
+        "test_failure": 0.05,
+        "build_error": 0.07,
+        "config_error": 0.06,
+        "network_error": 0.06,
+        "permissions_error": 0.12,
+        "unknown": 0.09,
+    }
+
     # Commands that are usually valid but can still impact runtime behavior/state.
     OPERATIONAL_PATTERNS = [
         (r"\bsed\b.*\s-i\b", 0.18, "Performs in-place file modifications"),
@@ -119,7 +143,48 @@ class RiskEvaluator:
             "reasons": reasons,
         }
 
-    def evaluate(self, fix: dict, diagnosis: dict, repo: str, branch: str) -> dict:
+    @staticmethod
+    def _normalize_fix_type(raw: str) -> str:
+        t = (raw or "manual").strip().lower()
+        if t in RiskEvaluator.FIX_TYPE_RISK:
+            return t
+        if t in RiskEvaluator.FIX_TYPE_ALIASES:
+            return RiskEvaluator.FIX_TYPE_ALIASES[t]
+        if t.endswith("_error"):
+            base = t[: -len("_error")]
+            if base in RiskEvaluator.FIX_TYPE_RISK:
+                return base
+        return "manual"
+
+    @staticmethod
+    def _branch_tail_and_risk(branch: str) -> tuple[str, float, str | None]:
+        """
+        Use the last path segment (e.g. origin/feature/main -> main) so we do not treat
+        unrelated names containing 'main'/'dev' substrings as protected branches.
+        """
+        branch_lower = (branch or "").lower().strip()
+        tail = branch_lower.replace("\\", "/").split("/")[-1] or branch_lower
+        branch_risk = 0.05
+        matched_key: str | None = None
+        for key, risk in RiskEvaluator.BRANCH_RISK.items():
+            if tail == key:
+                branch_risk = risk
+                matched_key = key
+                break
+            if tail.startswith(f"{key}-") or tail.endswith(f"-{key}"):
+                if risk > branch_risk:
+                    branch_risk = risk
+                    matched_key = key
+        return tail, branch_risk, matched_key
+
+    def evaluate(
+        self,
+        fix: dict,
+        diagnosis: dict,
+        repo: str,
+        branch: str,
+        raw_logs: str | None = None,
+    ) -> dict:
         """
         Return a risk report:
         {
@@ -156,24 +221,58 @@ class RiskEvaluator:
         breakdown["script_analysis"] = script_score
         total_score += script_score * 0.4  # 40% weight
 
-        # 2. Branch risk
-        branch_lower = branch.lower()
-        branch_risk = 0.05  # default
-        for key, risk in self.BRANCH_RISK.items():
-            if key in branch_lower:
-                branch_risk = risk
-                if risk >= 0.2:
-                    reasons.append(f"⚠️ Targeting protected branch: {branch}")
-                break
+        # 2. Branch risk (last path segment only — avoids false "main"/"dev" substring hits)
+        branch_tail, branch_risk, branch_key = self._branch_tail_and_risk(branch)
         protected_branch = branch_risk >= 0.2
+        if protected_branch and branch_key:
+            reasons.append(f"⚠️ Targeting protected branch segment '{branch_tail}' ({branch_key})")
         breakdown["branch_risk"] = branch_risk
+        breakdown["branch_tail"] = branch_tail
         total_score += branch_risk * 0.3  # 30% weight
 
-        # 3. Fix type risk
-        fix_type = fix.get("fix_type", "manual").lower()
+        # 3. Fix type risk (normalize LLM categories like dependency_error → dependency)
+        fix_type = self._normalize_fix_type(str(fix.get("fix_type", "manual")))
         fix_type_risk = self.FIX_TYPE_RISK.get(fix_type, 0.3)
+        breakdown["fix_type"] = fix_type
         breakdown["fix_type_risk"] = fix_type_risk
         total_score += fix_type_risk * 0.2  # 20% weight
+
+        # 3b. Diagnosis severity — when diagnosis is unknown, infer category from logs so risk varies by incident
+        diag = diagnosis if isinstance(diagnosis, dict) else {}
+        diag_cat = str(diag.get("failure_category", "unknown")).strip().lower()
+        failure_cat = diag_cat
+        breakdown["failure_category_source"] = "diagnosis"
+        if failure_cat in ("", "unknown"):
+            inferred = infer_failure_category_from_logs(raw_logs or "")
+            if inferred != "unknown":
+                failure_cat = inferred
+                breakdown["failure_category_source"] = "logs"
+                reasons.append(f"Heuristic: logs suggest {failure_cat.replace('_', ' ')}")
+
+        cat_weight = self.FAILURE_CATEGORY_WEIGHT.get(failure_cat, 0.08)
+        breakdown["failure_category"] = failure_cat
+        breakdown["failure_category_weight"] = cat_weight
+        total_score += cat_weight
+
+        # 3c. Stable fingerprint from full log body (bounded) — different incidents diverge in score
+        # even when category + fix template match (common with repeated CI templates).
+        log_body = (raw_logs or "")[:32000]
+        if log_body.strip():
+            digest = hashlib.sha256(log_body.encode("utf-8", errors="ignore")).digest()
+            v = int.from_bytes(digest[:4], "big") / (2**32)
+            log_jitter = round(0.018 + v * 0.092, 4)  # ~0.018–0.110
+            breakdown["log_fingerprint_weight"] = log_jitter
+            total_score += log_jitter
+
+        try:
+            conf = float(diag.get("confidence", 0.75))
+        except (TypeError, ValueError):
+            conf = 0.75
+        conf = min(max(conf, 0.0), 1.0)
+        uncertainty = (1.0 - conf) * 0.15
+        breakdown["diagnosis_confidence"] = conf
+        breakdown["uncertainty_from_confidence"] = round(uncertainty, 4)
+        total_score += uncertainty
 
         # 4. Script complexity (longer = riskier)
         lines = len([l for l in script.split("\n") if l.strip()])
@@ -239,11 +338,19 @@ class RiskEvaluator:
 
         logger.info(f"[Guardian] Risk score: {final_score} ({level}) | Reasons: {len(reasons)}")
 
+        justification = "; ".join(
+            r.replace("⚠️ ", "").replace("✅ ", "") for r in reasons if isinstance(r, str)
+        )
+
         return {
             "score": final_score,
             "level": level,
             "reasons": reasons,
             "breakdown": breakdown,
             "timing": timing,
-            "auto_approve": level in ("low", "medium")
+            "auto_approve": level in ("low", "medium"),
+            # Aliases for clients that expect these names (e.g. Simulate fix preview).
+            "risk_level": level,
+            "risk_score": final_score,
+            "justification": justification or "Risk derived from script, branch, fix type, and diagnosis signals.",
         }

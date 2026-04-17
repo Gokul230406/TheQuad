@@ -15,11 +15,11 @@ from backend.guardian.risk_evaluator import RiskEvaluator
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 _risk_evaluator = RiskEvaluator()
-RISK_EVALUATION_VERSION = 4
+RISK_EVALUATION_VERSION = 6
 
 
 @router.get("/stats")
-async def get_stats():
+async def get_stats(request: Request):
     """Overall system statistics for the dashboard."""
     total_events = await PipelineEvent.count()
     fixed = await PipelineEvent.find(PipelineEvent.status == PipelineStatus.FIXED).count()
@@ -52,6 +52,12 @@ async def get_stats():
         PipelineEvent.created_at >= since
     ).count()
 
+    component_status = getattr(request.app.state, "component_status", {})
+    degraded_components = [
+        name for name, state in component_status.items()
+        if isinstance(state, str) and state in ("unavailable", "degraded")
+    ]
+
     return {
         "total_events": total_events,
         "fixed": fixed,
@@ -63,7 +69,9 @@ async def get_stats():
         "successful_fixes": successful_fixes,
         "auto_fixed": auto_fixed,
         "pending_approvals": pending_approvals,
-        "events_last_24h": recent_events
+        "events_last_24h": recent_events,
+        "component_status": component_status,
+        "degraded_components": degraded_components,
     }
 
 
@@ -232,6 +240,7 @@ async def _refresh_event_assessment(event: PipelineEvent) -> None:
         diagnosis=diagnosis,
         repo=event.repo_full_name,
         branch=event.branch,
+        raw_logs=event.raw_logs or "",
     )
 
     event.risk_score = risk.get("score")

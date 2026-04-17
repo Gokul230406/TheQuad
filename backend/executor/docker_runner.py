@@ -46,11 +46,18 @@ class DockerRunner:
                 logger.warning("[DockerRunner] Dockerfile not found, using base image")
 
     async def run_fix(self, fix_script: str, repo_url: str,
-                      branch: str, event_id: str, repo_full_name: str) -> dict:
+                      branch: str, event_id: str, repo_full_name: str,
+                      simulated: bool = False) -> dict:
         """
         Execute a fix script inside a Docker container.
         Returns: {"exit_code": int, "output": str, "duration": float, "container_id": str}
         """
+        # Safety net: any synthetic "sim-*" event must never execute against a real repository.
+        forced_simulated = simulated or str(event_id).startswith("sim-")
+        if forced_simulated:
+            logger.info("[DockerRunner] Using simulated execution for demo/simulated event")
+            return await self._simulate_execution(fix_script)
+
         if not self.client:
             return await self._simulate_execution(fix_script)
 

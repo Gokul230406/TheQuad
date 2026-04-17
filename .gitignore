@@ -53,6 +53,9 @@ build/
 tmp/
 .cache/
 
+# Local SigNoz clone (start-signoz.ps1)
+.signoz/
+
 # Docker and compose overrides
 *.pid
 *.seed

@@ -1,6 +1,6 @@
 """
-Diagnosis Agent – Uses LangChain + Mistral to analyze pipeline logs
-and identify root causes of failures.
+Diagnosis Agent – Uses LangChain + configured LLM (Gemini default, Ollama or Mistral API optional)
+to analyze pipeline logs and identify root causes of failures.
 """
 import re
 import json
@@ -8,10 +8,11 @@ import logging
 from typing import Tuple, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_community.chat_models import ChatOllama
-from langchain_mistralai import ChatMistralAI
 
 from backend.config import settings
+from backend.agents.llm_factory import build_chat_llm
+from backend.agents.llm_retry import chat_invoke_with_retry
+from backend.agents.log_signals import infer_failure_category_from_logs
 from backend.models.pipeline_event import FailureCategory
 from backend.agents.vector_store import VectorStore
 
@@ -46,19 +47,7 @@ class DiagnosisAgent:
         self._init_llm()
 
     def _init_llm(self):
-        if settings.USE_OLLAMA:
-            self.llm = ChatOllama(
-                model=settings.LLM_MODEL,
-                base_url=settings.OLLAMA_BASE_URL,
-                temperature=0.1,
-                format="json"
-            )
-        else:
-            self.llm = ChatMistralAI(
-                model="mistral-large-latest",
-                api_key=settings.MISTRAL_API_KEY,
-                temperature=0.1
-            )
+        self.llm = build_chat_llm(temperature=0.1, json_mode=True)
 
     async def analyze(self, event_id: str, logs: str, repo: str, branch: str,
                       commit_message: str) -> dict:
@@ -93,9 +82,9 @@ Analyze the above logs and return a JSON diagnosis.
             HumanMessage(content=user_prompt)
         ]
 
-        # 4. Call LLM
+        # 4. Call LLM (retry on Gemini429 / quota)
         try:
-            response = self.llm.invoke(messages)
+            response = await chat_invoke_with_retry(self.llm, messages)
             result = self._parse_json_response(response.content)
         except Exception as e:
             logger.error(f"LLM diagnosis failed: {e}")
@@ -146,25 +135,16 @@ Analyze the above logs and return a JSON diagnosis.
 
     def _fallback_diagnosis(self, logs: str) -> dict:
         """Rule-based fallback when LLM fails."""
-        log_lower = logs.lower()
-        if "modulenotfounderror" in log_lower or "no module named" in log_lower:
-            category = "dependency_error"
-            root_cause = "Missing Python module – dependency not installed"
-        elif "assertionerror" in log_lower or "failed test" in log_lower or "pytest" in log_lower:
-            category = "test_failure"
-            root_cause = "Unit test assertion failed"
-        elif "syntaxerror" in log_lower or "unexpected token" in log_lower:
-            category = "build_error"
-            root_cause = "Syntax error in source code"
-        elif "permission denied" in log_lower:
-            category = "permissions_error"
-            root_cause = "File or resource permission denied"
-        elif "connection refused" in log_lower or "timeout" in log_lower:
-            category = "network_error"
-            root_cause = "Network connection issue"
-        else:
-            category = "unknown"
-            root_cause = "Unknown pipeline failure – manual inspection required"
+        category = infer_failure_category_from_logs(logs)
+        root_causes = {
+            "dependency_error": "Dependency resolution or package install failure",
+            "test_failure": "Unit test assertion failed",
+            "build_error": "Build or compile / config parse failure",
+            "permissions_error": "File or resource permission denied",
+            "network_error": "Network connectivity or timeout issue",
+            "unknown": "Unknown pipeline failure – manual inspection required",
+        }
+        root_cause = root_causes.get(category, root_causes["unknown"])
 
         return {
             "root_cause": root_cause,

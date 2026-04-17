@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
+import toast from 'react-hot-toast'
 import {
   ArrowLeft,
   CircleCheck,
@@ -16,6 +17,7 @@ import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
 import { Progress } from '../components/ui/progress'
+import { verificationRecordPassed } from '../utils/verification.js'
 
 const FLOW_STEPS = [
   { key: 'failed', label: 'Failure detected', icon: XCircle },
@@ -74,20 +76,53 @@ export default function EventDetail() {
   const [tab, setTab] = useState('overview')
 
   useEffect(() => {
-    fetchEvent()
-    const interval = setInterval(fetchEvent, 5000)
-    return () => clearInterval(interval)
+    let cancelled = false
+    setEvent(null)
+    setLoading(true)
+
+    async function load() {
+      try {
+        const response = await fetch(`/api/dashboard/events/${id}`)
+        if (!response.ok || cancelled) {
+          if (!cancelled && response.status === 404) setEvent(null)
+          return
+        }
+        const data = await response.json()
+        if (
+          !cancelled &&
+          data &&
+          (String(data.id) === String(id) || String(data.event_id) === String(id))
+        ) {
+          setEvent(data)
+        }
+      } catch (_) {
+        return
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+
+    load()
+    const interval = setInterval(load, 5000)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
   }, [id])
 
-  async function fetchEvent() {
-    try {
-      const response = await fetch(`/api/dashboard/events/${id}`)
-      if (response.ok) setEvent(await response.json())
-    } catch (_) {
+  useEffect(() => {
+    if (
+      !event ||
+      (String(event.id) !== String(id) && String(event.event_id) !== String(id))
+    ) {
       return
     }
-    setLoading(false)
-  }
+    const v = event.metadata?.verification
+    if (!verificationRecordPassed(v) || !event.event_id) return
+    toast.success('Verification passed: tests succeeded.', {
+      id: `verify-${event.event_id}-ok`,
+    })
+  }, [id, event])
 
   if (loading) return <div className="page-loader">Loading event details...</div>
 

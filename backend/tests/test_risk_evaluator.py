@@ -42,3 +42,31 @@ def test_risk_evaluator_returns_timing_metadata():
     assert "timing" in report
     assert report["timing"]["estimated_seconds"] > 20
     assert report["timing"]["level"] in {"moderate", "slow"}
+
+
+def test_risk_evaluator_same_fix_differs_by_diagnosis_and_branch():
+    """Regression: fix_type + diagnosis + branch must not collapse to one score for all sims."""
+    evaluator = RiskEvaluator()
+    fix = {
+        "fix_type": "dependency_error",
+        "fix_script": "#!/bin/bash\nset -e\npip install -r requirements.txt\n",
+        "estimated_risk": 0.25,
+    }
+    low = evaluator.evaluate(
+        fix,
+        {"failure_category": "test_failure", "confidence": 0.92},
+        "demo/repo",
+        "develop",
+    )["score"]
+    high = evaluator.evaluate(
+        fix,
+        {"failure_category": "permissions_error", "confidence": 0.55},
+        "demo/repo",
+        "production",
+    )["score"]
+    assert low < high
+    sample = evaluator.evaluate(
+        fix, {"failure_category": "test_failure"}, "demo/repo", "develop"
+    )
+    assert sample.get("risk_level") == sample.get("level")
+    assert "justification" in sample and sample["justification"]

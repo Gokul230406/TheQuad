@@ -1,6 +1,6 @@
 import os
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings
-from typing import Optional
 
 class Settings(BaseSettings):
     # App
@@ -25,11 +25,17 @@ class Settings(BaseSettings):
     PIPEGENIE_BOT_NAME: str = "PipeGenie Bot"
     PIPEGENIE_BOT_EMAIL: str = "pipegenie-bot@users.noreply.github.com"
 
-    # AI / Mistral
-    MISTRAL_API_KEY: str = ""          # For Mistral API
+    # AI — provider: gemini (default) | ollama | mistral (see backend/agents/llm_factory.py)
+    LLM_PROVIDER: str = "gemini"
+    MISTRAL_API_KEY: str = ""
     OLLAMA_BASE_URL: str = "http://localhost:11434"
-    USE_OLLAMA: bool = True            # True = local Ollama, False = Mistral API
-    LLM_MODEL: str = "mistral"         # Ollama model name
+    USE_OLLAMA: bool = False
+    LLM_MODEL: str = "mistral"
+    GEMINI_API_KEY: str = Field(
+        default="",
+        validation_alias=AliasChoices("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+    )
+    GEMINI_MODEL: str = "gemini-2.0-flash"
 
     # MilvusDB
     MILVUS_HOST: str = "localhost"
@@ -37,6 +43,9 @@ class Settings(BaseSettings):
 
     # Docker
     DOCKER_NETWORK: str = "pipegenie-net"
+    AUTO_RUN_DOCKER_TESTS: bool = True
+    DOCKER_TEST_COMMAND: str = "docker compose --profile test run --rm backend-tests"
+    DOCKER_TEST_TIMEOUT_SECONDS: int = 900
 
     # Risk thresholds
     RISK_LOW_THRESHOLD: float = 0.3

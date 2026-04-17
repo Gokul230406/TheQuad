@@ -1,0 +1,9 @@
+# Applied by start-signoz.ps1 together with SigNoz upstream compose.
+# Provisions a root user at first start (SigNoz v0.112+). Dev/local only — change for production.
+services:
+  signoz:
+    environment:
+      - SIGNOZ_USER_ROOT_ENABLED=true
+      - SIGNOZ_USER_ROOT_EMAIL=admin@pipegenie.local
+      - SIGNOZ_USER_ROOT_PASSWORD=admin
+      - SIGNOZ_USER_ROOT_ORG_NAME=default

@@ -12,9 +12,59 @@ from fastapi import APIRouter, Request, HTTPException, BackgroundTasks, Depends
 from backend.config import settings
 from backend.models.pipeline_event import PipelineEvent, PipelineStatus
 from backend.services.github_service import GitHubService
+from backend.schemas.requests import (
+    PreviewRequest,
+    ScenarioBuilderRequest,
+    SimulationRequest,
+)
+from backend.agents.llm_factory import build_chat_llm
+from backend.agents.llm_retry import chat_invoke_with_retry, is_llm_rate_limit_error
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 logger = logging.getLogger(__name__)
+
+
+def _builder_chat_user_visible_error(exc: Exception) -> tuple[str, str]:
+    """Return (message_for_client, error_detail) for builder-chat failures."""
+    detail = str(exc).strip() or type(exc).__name__
+    if isinstance(exc, ModuleNotFoundError) and "langchain_google" in detail:
+        msg = (
+            "Missing Python package for Gemini (langchain-google-genai). "
+            "Install backend dependencies: pip install -r backend/requirements.txt"
+        )
+        return msg, detail
+    # Rate limits before ValueError: some client wrappers subclass ValueError.
+    if is_llm_rate_limit_error(exc):
+        msg = (
+            "Gemini rate limit or free-tier quota reached (free tier is very small per model). "
+            "Wait a minute and retry, enable billing in Google AI Studio, set GEMINI_MODEL to a "
+            "lighter model, or use LLM_PROVIDER=ollama in backend/.env with Ollama running locally."
+        )
+        return msg, detail
+    if isinstance(exc, ValueError):
+        return detail, detail
+    return f"Failed to process message ({type(exc).__name__}: {detail[:400]})", detail
+
+
+def _coerce_llm_content_to_str(content) -> str:
+    """Normalize LangChain / Gemini message content to a plain string."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and item.get("type") == "text" and "text" in item:
+                parts.append(str(item["text"]))
+            elif isinstance(item, dict) and "text" in item:
+                parts.append(str(item["text"]))
+            else:
+                parts.append(str(item))
+        return "".join(parts)
+    return str(content)
 router = APIRouter(prefix="/webhook", tags=["webhooks"])
 
 
@@ -46,11 +96,13 @@ Before that, just respond with conversational text asking the next question."""
 
 
 @router.post("/builder-chat")
-async def scenario_builder_chat(request: Request, orchestrator=Depends(get_orchestrator)):
+async def scenario_builder_chat(
+    payload: ScenarioBuilderRequest,
+    orchestrator=Depends(get_orchestrator)
+):
     """Conversational scenario builder - ask clarifying questions to build a failure scenario."""
-    body = await request.json()
-    session_id = body.get("session_id", "default")
-    user_message = body.get("message", "")
+    session_id = payload.session_id
+    user_message = payload.message
     
     if session_id not in _builder_sessions:
         _builder_sessions[session_id] = {"history": [], "turn_count": 0}
@@ -69,19 +121,14 @@ async def scenario_builder_chat(request: Request, orchestrator=Depends(get_orche
     
     try:
         started = time.perf_counter()
-        provider = "unknown"
         parsed_payload = None
 
-        # Try to use orchestrator's LLM model
-        if hasattr(orchestrator.diagnosis_agent, 'llm'):
-            provider = type(orchestrator.diagnosis_agent.llm).__name__
-            response = orchestrator.diagnosis_agent.llm.invoke(messages)
-            assistant_message = response.content
-        else:
-            # Fallback
-            assistant_message = "I'm having trouble connecting. Could you describe what error you saw?"
+        # Conversational builder must NOT use diagnosis JSON mode (Gemini JSON-only breaks chat turns).
+        builder_llm = build_chat_llm(temperature=0.35, json_mode=False)
+        provider = type(builder_llm).__name__
+        response = await chat_invoke_with_retry(builder_llm, messages)
+        assistant_message = _coerce_llm_content_to_str(getattr(response, "content", None))
 
-        # ChatOllama may return JSON text because diagnosis model is configured for JSON output.
         if isinstance(assistant_message, str):
             try:
                 parsed_payload = json.loads(assistant_message)
@@ -93,6 +140,13 @@ async def scenario_builder_chat(request: Request, orchestrator=Depends(get_orche
                 assistant_message = parsed_payload["Assistant"]
             elif "message" in parsed_payload and isinstance(parsed_payload["message"], str):
                 assistant_message = parsed_payload["message"]
+            elif "reply" in parsed_payload and isinstance(parsed_payload["reply"], str):
+                assistant_message = parsed_payload["reply"]
+            elif parsed_payload.get("ready_to_simulate"):
+                nm = parsed_payload.get("scenario_name") or "your scenario"
+                assistant_message = (
+                    f"Scenario is ready: {nm}. Close this panel and click Run simulation when you are ready."
+                )
 
         elapsed_ms = int((time.perf_counter() - started) * 1000)
         logger.info(f"[BuilderChat] provider={provider} elapsed_ms={elapsed_ms} session={session_id}")
@@ -122,12 +176,9 @@ async def scenario_builder_chat(request: Request, orchestrator=Depends(get_orche
         }
     
     except Exception as e:
-        logger.error(f"Builder chat failed: {e}")
-        return {"error": str(e), "message": "Failed to process message"}
-
-
-def get_orchestrator(request: Request):
-    return request.app.state.orchestrator
+        logger.exception("Builder chat failed")
+        user_msg, detail = _builder_chat_user_visible_error(e)
+        return {"error": detail, "message": user_msg}
 
 
 def verify_signature(payload_body: bytes, signature_header: str) -> bool:
@@ -222,17 +273,15 @@ def _extract_logs_from_payload(payload: dict) -> str:
 
 
 @router.post("/preview-diagnosis")
-async def preview_diagnosis(request: Request, orchestrator=Depends(get_orchestrator)):
+async def preview_diagnosis(payload: PreviewRequest, orchestrator=Depends(get_orchestrator)):
     """Preview diagnosis for simulation logs (agentic workflow)."""
-    body = await request.json()
-    
     try:
         diagnosis = await orchestrator.diagnosis_agent.analyze(
             event_id="preview",
-            logs=body.get("logs", ""),
-            repo=body.get("repo", "demo-repo"),
-            branch=body.get("branch", "main"),
-            commit_message=body.get("commit_message", "")
+            logs=payload.logs,
+            repo=payload.repo,
+            branch=payload.branch,
+            commit_message=payload.commit_message
         )
         return {"diagnosis": diagnosis}
     except Exception as e:
@@ -241,34 +290,33 @@ async def preview_diagnosis(request: Request, orchestrator=Depends(get_orchestra
 
 
 @router.post("/preview-fix")
-async def preview_fix(request: Request, orchestrator=Depends(get_orchestrator)):
+async def preview_fix(payload: PreviewRequest, orchestrator=Depends(get_orchestrator)):
     """Preview proposed fix before executing (agentic workflow)."""
-    body = await request.json()
-    
     try:
         # First diagnose
         diagnosis = await orchestrator.diagnosis_agent.analyze(
             event_id="preview-fix",
-            logs=body.get("logs", ""),
-            repo=body.get("repo", "demo-repo"),
-            branch=body.get("branch", "main"),
-            commit_message=body.get("commit_message", "")
+            logs=payload.logs,
+            repo=payload.repo,
+            branch=payload.branch,
+            commit_message=payload.commit_message
         )
         
         # Then generate a fix based on diagnosis
         fix = await orchestrator.fixer_agent.generate_fix(
             diagnosis=diagnosis,
-            repo=body.get("repo", "demo-repo"),
-            branch=body.get("branch", "main"),
-            raw_logs=body.get("logs", "")
+            repo=payload.repo,
+            branch=payload.branch,
+            raw_logs=payload.logs
         )
         
         # Evaluate risk
         risk = orchestrator.risk_evaluator.evaluate(
             fix=fix,
             diagnosis=diagnosis,
-            repo=body.get("repo", "demo-repo"),
-            branch=body.get("branch", "main")
+            repo=payload.repo,
+            branch=payload.branch,
+            raw_logs=payload.logs or "",
         )
         
         return {
@@ -283,23 +331,21 @@ async def preview_fix(request: Request, orchestrator=Depends(get_orchestrator)):
 
 @router.post("/simulate")
 async def simulate_failure(
-    request: Request,
+    payload: SimulationRequest,
     background_tasks: BackgroundTasks,
     orchestrator=Depends(get_orchestrator)
 ):
     """Simulate a pipeline failure for testing (dev endpoint)."""
-    body = await request.json()
-
     event = PipelineEvent(
         event_id=f"sim-{int(datetime.utcnow().timestamp())}",
-        repo_full_name=body.get("repo", "demo-org/demo-repo"),
-        repo_name=body.get("repo", "demo-repo").split("/")[-1],
-        branch=body.get("branch", "main"),
-        commit_sha=body.get("commit_sha", "abc1234"),
-        commit_message=body.get("commit_message", "feat: add new feature"),
-        workflow_name=body.get("workflow_name", "CI Pipeline"),
+        repo_full_name=payload.repo,
+        repo_name=payload.repo.split("/")[-1],
+        branch=payload.branch,
+        commit_sha=payload.commit_sha,
+        commit_message=payload.commit_message,
+        workflow_name=payload.workflow_name,
         status=PipelineStatus.FAILED,
-        raw_logs=body.get("logs", DEFAULT_SAMPLE_LOGS),
+        raw_logs=payload.logs or DEFAULT_SAMPLE_LOGS,
         metadata={"simulated": True}
     )
     await event.insert()

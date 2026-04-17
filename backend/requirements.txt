@@ -11,11 +11,12 @@ beanie==1.26.0
 # Redis
 redis==5.0.6
 
-# AI / LangChain
-langchain==0.2.6
-langchain-core==0.2.10
-langchain-community==0.2.6
+# AI / LangChain (keep in sync: google-genai needs langchain-core>=0.2.33)
+langchain==0.2.16
+langchain-core==0.2.43
+langchain-community==0.2.16
 langchain-mistralai==0.1.8
+langchain-google-genai==1.0.10
 
 # MilvusDB
 pymilvus==2.4.0
@@ -34,6 +35,12 @@ python-multipart==0.0.9
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 python-dotenv==1.0.1
+
+# Observability / OpenTelemetry (SigNoz)
+opentelemetry-api
+opentelemetry-sdk
+opentelemetry-exporter-otlp-proto-http
+opentelemetry-instrumentation-fastapi
 
 # Testing
 pytest==8.3.3
