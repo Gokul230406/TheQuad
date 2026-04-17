@@ -1,47 +1,165 @@
-# PipeGenie – Setup Guide
+# PipeGenie – Complete Setup Guide (Windows + Docker Desktop + SigNoz + Milvus)
 
-**AI-assisted CI/CD failure handling:** capture failures → diagnose with an LLM → propose fixes → score risk → **human approval** → execute in Docker → optional post-fix test run → live dashboard updates.
+PipeGenie is an **AI-assisted CI/CD failure handler**:
 
----
-
-## Quick start
-
-### Prerequisites
-
-| Tool | Notes |
-|------|--------|
-| Python | 3.11+ |
-| Node.js | 18+ |
-| MongoDB | Local or Atlas |
-| Docker | Optional but recommended for fix execution and post-fix `backend-tests` verification |
-| LLM | **Gemini** (default, needs API key) or **Ollama** (local) or **Mistral API** – see below |
+- **Capture** a pipeline failure (GitHub webhook or simulator)
+- **Diagnose** the root cause with an LLM (Gemini / Ollama / Mistral)
+- **Generate** a fix script
+- **Score risk** (Guardian)
+- **Require human approval**
+- **Execute in Docker** (isolated)
+- **Optionally run post-fix verification tests** in Docker
+- **Stream updates live** to the dashboard via WebSocket
+- **Observability** via OpenTelemetry → **SigNoz**
+- **Vector memory** via **Milvus** (optional; degrades gracefully if not running)
 
 ---
 
-## LLM configuration (`backend/.env`)
+## Prerequisites
 
-The backend selects the provider in `backend/agents/llm_factory.py`:
+| Tool | Why | Install |
+|------|-----|---------|
+| Python 3.11+ | backend local dev | `https://python.org` |
+| Node 18+ | frontend dev | `https://nodejs.org` |
+| Git | SigNoz bootstrap script clones upstream repo | `https://git-scm.com/download/win` |
+| Docker Desktop (Windows) | Docker execution, Milvus stack, SigNoz, verification | `https://www.docker.com/products/docker-desktop/` |
 
-1. `LLM_PROVIDER` = `gemini` | `ollama` | `mistral` (when set explicitly)
+---
+
+## Step 0 — Install Docker Desktop (Windows) + verify
+
+### Install
+
+1. Install **Docker Desktop for Windows**.
+2. In Docker Desktop settings:
+   - **Enable WSL2 backend** (recommended).
+   - Ensure your distro is enabled under **WSL Integration**.
+3. Start Docker Desktop and wait for “Docker is running”.
+
+### Verify
+
+Open PowerShell and run:
+
+```powershell
+docker version
+docker compose version
+docker run --rm hello-world
+```
+
+If pulls fail due to Docker Hub rate limits, run:
+
+```powershell
+docker login
+```
+
+---
+
+## Step 1 — Bring up MongoDB + Redis + Milvus (recommended)
+
+PipeGenie can run without Milvus, but **similarity search / fix memory** is enabled only when Milvus is reachable.
+
+This repo includes a Milvus standalone stack in `docker-compose.yml`:
+
+- `etcd` (Milvus metadata)
+- `minio` (Milvus storage)
+- `milvus` (vector DB)
+- `mongodb`, `redis`
+
+From the project root:
+
+```powershell
+cd path\to\PipeGenie
+docker compose up -d mongodb redis etcd minio milvus
+```
+
+Ports (local):
+
+- MongoDB: `27017`
+- Redis: `6379`
+- Milvus: `19530` (gRPC), `9091` (HTTP)
+- MinIO: `9000`, `9001`
+
+Quick health check:
+
+```powershell
+docker ps
+docker compose logs -n 50 milvus
+```
+
+---
+
+## Step 2 — SigNoz (Observability) install + run
+
+PipeGenie exports **traces + app logs** over OTLP/HTTP to SigNoz.
+
+This repo includes a one-command Windows script:
+
+```powershell
+cd path\to\PipeGenie
+.\start-signoz.ps1
+```
+
+What it does:
+
+- Clones SigNoz upstream into `.signoz\signoz` (one time)
+- Runs the official SigNoz Docker Compose
+- Applies `docker-compose.signoz-override.yml` to create a dev login:
+  - **Email**: `admin@pipegenie.local`
+  - **Password**: `admin`
+
+After start:
+
+- **SigNoz UI**: `http://localhost:8080`
+- **OTLP HTTP endpoint**: `http://localhost:4318`
+
+### PipeGenie OpenTelemetry env
+
+PipeGenie’s OTEL config is in `backend/telemetry.py` and `backend/.env.example`.
+
+Recommended `backend/.env` values:
+
+```env
+OTEL_ENABLED=true
+# Base URL (NOT /v1/traces) — PipeGenie will append /v1/traces + /v1/logs
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+OTEL_SERVICE_NAME=pipegenie-backend
+```
+
+If you do **not** want SigNoz noise in dev:
+
+```env
+OTEL_ENABLED=false
+```
+
+---
+
+## Step 3 — LLM configuration (Gemini / Ollama / Mistral)
+
+Selection rules (see `backend/agents/llm_factory.py`):
+
+1. **Explicit:** `LLM_PROVIDER=gemini|ollama|mistral`
 2. Legacy: `USE_OLLAMA=true` → Ollama
-3. Default: **Gemini** if a Gemini key is present
+3. Otherwise defaults to Gemini when a key exists, else may fall back to Mistral if configured
 
-**Gemini (default)**
+### Option A: Gemini (default)
 
 ```env
 LLM_PROVIDER=gemini
 GEMINI_API_KEY=your-key
-# or GOOGLE_API_KEY=...
 GEMINI_MODEL=gemini-2.0-flash
 ```
 
-Free-tier quotas are small (per-model RPM). The API returns `429` / quota errors; the backend **retries with backoff** and parses “retry in Ns” when present. If you hit limits often: wait, enable billing in Google AI Studio, use a lighter `GEMINI_MODEL`, or switch to Ollama.
+Gemini free-tier quotas are small. The backend retries on 429/quota and honors “retry in Ns”.
 
-**Ollama (local, no Gemini key)**
+### Option B: Ollama (local)
+
+Install Ollama (Windows), then:
 
 ```powershell
 ollama pull mistral
 ```
+
+Backend `.env`:
 
 ```env
 LLM_PROVIDER=ollama
@@ -49,7 +167,7 @@ OLLAMA_BASE_URL=http://localhost:11434
 LLM_MODEL=mistral
 ```
 
-**Mistral API**
+### Option C: Mistral API
 
 ```env
 LLM_PROVIDER=mistral
@@ -58,17 +176,9 @@ MISTRAL_API_KEY=your-key
 
 ---
 
-## MongoDB
+## Step 4 — Backend: install + run (local dev)
 
-**Local:** run `mongod` or Windows service.
-
-**Atlas:** set `MONGODB_URL=mongodb+srv://...` in `backend/.env`.
-
----
-
-## Backend setup
-
-From the **PipeGenie repo root** (folder that contains `backend/` and `frontend/`):
+### Install
 
 ```powershell
 cd path\to\PipeGenie\backend
@@ -77,45 +187,46 @@ python -m venv venv
 pip install -r requirements.txt
 ```
 
-Copy or create `backend/.env` (see `config.py` / team template). Minimum example:
+Create `backend/.env` (use `backend/.env.example` as a base). Minimum:
 
 ```env
 MONGODB_URL=mongodb://localhost:27017
 MONGODB_DB=pipegenie
 REDIS_URL=redis://localhost:6379
+MILVUS_HOST=localhost
+MILVUS_PORT=19530
 
-# Pick one LLM stack (Gemini example):
+GITHUB_TOKEN=
+GITHUB_WEBHOOK_SECRET=pipegenie-webhook-secret
+
+# Pick ONE LLM stack:
 LLM_PROVIDER=gemini
 GEMINI_API_KEY=
 GEMINI_MODEL=gemini-2.0-flash
 
-GITHUB_TOKEN=
-GITHUB_WEBHOOK_SECRET=pipegenie-webhook-secret
+# SigNoz (optional)
+OTEL_ENABLED=true
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+OTEL_SERVICE_NAME=pipegenie-backend
 ```
 
----
+### Run (recommended)
 
-## Start the backend
-
-From the **project root** (parent of `backend/`):
+From the repo root (uses the project venv):
 
 ```powershell
+cd path\to\PipeGenie
 .\start-backend.ps1 -Port 8000 -Reload
 ```
 
-`start-backend.ps1` stops any process already listening on the port, then runs Uvicorn with the project venv.
+Backend endpoints:
 
-Manual alternative (from project root, venv activated):
-
-```powershell
-python -m uvicorn backend.main:app --reload --port 8000
-```
-
-Expected log lines include MongoDB connected, orchestrator ready, and **PipeGenie is live**. API docs: http://localhost:8000/docs
+- Swagger docs: `http://localhost:8000/docs`
+- Health: `http://localhost:8000/health`
 
 ---
 
-## Start the frontend
+## Step 5 — Frontend: install + run (local dev)
 
 ```powershell
 cd path\to\PipeGenie\frontend
@@ -123,142 +234,169 @@ npm install
 npm run dev
 ```
 
-Vite serves the app (default **http://localhost:5173**; another port is used if 5173 is busy).
+Vite will use `http://localhost:5173/` unless that port is taken, then it tries another port.
 
-**API and WebSocket in dev**
+### Why `/api` and WebSocket “just work” in dev
 
-- HTTP calls use relative paths like `/api/...` and are **proxied** to the backend (see `frontend/vite.config.js`).
-- The dashboard WebSocket uses **the same host as the page** (e.g. `ws://localhost:5173/api/dashboard/ws`) so the proxy can reach the backend. Do not hard-code `ws://localhost:8000` in the client when using Vite dev.
+`frontend/vite.config.js` proxies:
 
-**Optional:** `VITE_BACKEND_URL=http://localhost:8000` – used for health fetches and to build the WebSocket URL when set.
+- HTTP: `/api/*` → `http://localhost:8000`
+- WS: `/api/dashboard/ws` over the same origin → backend WS
+
+So in dev:
+
+- The client uses **relative** HTTP calls (`/api/...`)
+- The dashboard WebSocket is derived from **the current page host**
+
+Optional: to point the UI at a different backend host/port:
+
+```env
+VITE_BACKEND_URL=http://localhost:8000
+VITE_LOGS_UI_URL=http://localhost:8080
+```
 
 ---
 
-## Try the system
+## Step 6 — Run everything with Docker Compose (alternative)
 
-### Simulate page
+This repo includes `backend` + `frontend` containers in `docker-compose.yml`.
 
-1. Open `/simulate` (e.g. http://localhost:5173/simulate).
-2. Choose a scenario and **Run simulation**, or use the scenario builder.
-3. Open **Approvals**, review the fix, **Approve** – execution runs in Docker; when the fix succeeds, **post-fix Docker verification** may run (`docker compose --profile test run --rm backend-tests` by default).
-4. Watch the **Dashboard** for live WebSocket updates. You should see toasts for `verification_started` / `verification_complete` when verification runs (and a polling fallback on the event detail page if a message was missed).
+From the repo root:
 
-The scenario builder can take **up to a few minutes** if Gemini is rate-limited (retries + backoff).
+```powershell
+docker compose up -d mongodb redis etcd minio milvus backend frontend
+```
 
-### Direct simulate API
+Then open:
+
+- UI: `http://localhost:5173`
+- API: `http://localhost:8000`
+
+Notes:
+
+- In docker compose, the backend is wired to container-hostnames:
+  - `MONGODB_URL=mongodb://mongodb:27017`
+  - `MILVUS_HOST=milvus`
+- The compose file currently sets `USE_OLLAMA=true` for the backend container and includes an `ollama` container. If you want Gemini in Docker, adjust the compose env and provide keys via `backend/.env`.
+
+---
+
+## Step 7 — Demo: simulate → approve → verify (and see notifications)
+
+### A) Use the UI
+
+1. Open the UI and go to `/simulate`.
+2. Run a simulation.
+3. Go to **Approvals** → **Approve** the fix.
+4. Watch the dashboard live feed. If verification is enabled and Docker is available, you should see:
+   - `verification_started` toast
+   - `verification_complete` toast (passed/failed/skipped)
+
+### B) API simulate (PowerShell)
 
 ```powershell
 $body = @{
-  repo = "demo-org/demo-repo"
-  branch = "main"
-  commit_sha = "abc1234"
-  commit_message = "demo failure"
-  logs = "ERROR: No module named 'cryptography'"
+  repo = \"demo-org/demo-repo\"
+  branch = \"main\"
+  commit_sha = \"abc1234\"
+  commit_message = \"demo failure\"
+  workflow_name = \"demo\"
+  logs = \"ERROR: No module named 'cryptography'\"
 } | ConvertTo-Json
 
-Invoke-RestMethod -Uri "http://localhost:8000/api/webhook/simulate" `
-  -Method POST -Body $body -ContentType "application/json"
+Invoke-RestMethod -Uri \"http://localhost:8000/api/webhook/simulate\" `
+  -Method POST -Body $body -ContentType \"application/json\"
 ```
 
-### Docker sample tests
+### Post-fix Docker verification
+
+PipeGenie’s post-fix verification command is configurable:
+
+- `AUTO_RUN_DOCKER_TESTS=true|false`
+- `DOCKER_TEST_COMMAND` (default: `docker compose --profile test run --rm backend-tests`)
+- `DOCKER_TEST_TIMEOUT_SECONDS`
+
+Manual run:
 
 ```powershell
+cd path\to\PipeGenie
 docker compose --profile test run --rm backend-tests
 ```
 
-### `verify-fix.ps1`
+One-command verification helper:
 
 ```powershell
+cd path\to\PipeGenie
 .\verify-fix.ps1
 # optional: .\verify-fix.ps1 -PullLatestImages
 ```
 
-Runs the same style of check as automatic post-fix verification.
-
 ---
 
-## GitHub integration
+## Step 8 — GitHub integration (real failures)
 
-1. Create a PAT with `repo` and `actions`; set `GITHUB_TOKEN` in `backend/.env`.
-2. Webhook URL: `https://<your-host>/api/webhook/github` (use ngrok locally). Secret must match `GITHUB_WEBHOOK_SECRET`.
-3. Install `.github/workflows/ci-with-pipegenie.yml` in the target repo and set repo secrets `PIPEGENIE_URL` and `PIPEGENIE_WEBHOOK_SECRET`.
+### 1) Token
 
----
+Create a GitHub PAT with `repo` and `actions` and set in `backend/.env`:
 
-## Architecture (summary)
-
-```
-GitHub Actions ──webhook──▶ FastAPI ──▶ MongoDB (Beanie)
-                              │
-                              ▼
-                    Agent orchestrator
-                    Diagnosis + Fixer (LangChain)
-                    Risk evaluator (Guardian)
-                              │
-                    Human approval (React)
-                              │
-                    Docker runner (fix) ──▶ optional verification (Docker tests)
-                              │
-                    WebSocket ──▶ Dashboard
+```env
+GITHUB_TOKEN=ghp_...
 ```
 
-**Vector memory:** Embeddings and fix history use **Milvus** when `MILVUS_HOST` / `MILVUS_PORT` are reachable (see `docker-compose.yml`). If Milvus is down, the app continues; vector features are skipped.
+### 2) Webhook
 
-**Approval-first flow:** New failures get a proposed fix and an **approval request**. Execution happens after **Approve** in the UI (or API), not silently from risk tier alone.
+Repo → Settings → Webhooks:
 
----
+- Payload URL: `http(s)://<your-host>/api/webhook/github`
+- Content type: `application/json`
+- Secret: same as `GITHUB_WEBHOOK_SECRET`
+- Events: **Workflow runs**
 
-## Guardian risk scoring
+Local dev: use ngrok:
 
-Risk is computed for transparency and sorting in the approval UI (script patterns, branch, fix type, complexity, timing, etc.). **All simulated/production flows in the current orchestrator route fixes through human approval** before Docker execution.
+```powershell
+ngrok http 8000
+```
 
----
+### 3) Workflow
 
-## API reference (selected)
+Copy `.github/workflows/ci-with-pipegenie.yml` into the target repo and set secrets:
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/webhook/github` | POST | GitHub webhook |
-| `/api/webhook/simulate` | POST | Inject a test failure |
-| `/api/webhook/builder-chat` | POST | Scenario builder chat |
-| `/api/webhook/preview-diagnosis` | POST | Preview diagnosis |
-| `/api/webhook/preview-fix` | POST | Preview fix + risk |
-| `/api/dashboard/stats` | GET | Stats |
-| `/api/dashboard/events` | GET | Event list |
-| `/api/dashboard/events/{id}` | GET | Event detail |
-| `/api/dashboard/ws` | WebSocket | Live feed |
-| `/api/approvals/pending` | GET | Pending approvals |
-| `/api/approvals/{id}/approve` | POST | Approve and run fix |
-| `/api/approvals/{id}/reject` | POST | Reject |
-| `/health` | GET | Health |
-| `/docs` | GET | Swagger |
+- `PIPEGENIE_URL`
+- `PIPEGENIE_WEBHOOK_SECRET`
 
 ---
 
-## Troubleshooting
+## Components and ports
 
-| Issue | What to try |
-|-------|-------------|
-| MongoDB connection failed | Start `mongod` or fix `MONGODB_URL` |
-| Gemini `429` / quota | Wait, billing in AI Studio, lighter `GEMINI_MODEL`, or `LLM_PROVIDER=ollama` |
-| Ollama errors | `ollama serve`, `ollama pull mistral`, check `OLLAMA_BASE_URL` |
-| No live dashboard updates | Use the Vite URL so `/api` and WS are proxied; check backend on 8000 |
-| No verification toast | Ensure Docker runs `backend-tests`; check event timeline and `metadata.verification`; keep dashboard open or open event detail (polling) |
-| Redis / Milvus warnings | Optional; app runs with degraded cache / vector features |
-| Port 8000 in use | `.\start-backend.ps1 -Port 8001` and set `VITE_BACKEND_URL` if needed |
-| `WinError 10013` on 8000 | Port blocked or in use; pick another port |
-
----
-
-## Hackathon talking points
-
-1. **Real LLM reasoning** on logs (Gemini, Ollama, or Mistral).
-2. **Guardian-style risk** surfaced before any fix runs.
-3. **Human-in-the-loop** approval before Docker execution.
-4. **Isolated execution** and optional **automated Docker verification** after a successful fix.
-5. **Live operations UI** via WebSocket + REST.
-6. **Milvus** (when available) for similarity over past failures and fixes.
+| Component | Default | Notes |
+|----------|---------|------|
+| Backend API | `http://localhost:8000` | FastAPI (`/docs`) |
+| Dashboard WS | `ws://<ui-host>/api/dashboard/ws` | proxied in Vite dev |
+| Frontend UI | `http://localhost:5173` | Vite may pick another port |
+| SigNoz UI | `http://localhost:8080` | `.\start-signoz.ps1` |
+| SigNoz OTLP | `http://localhost:4318` | OTLP/HTTP |
+| MongoDB | `mongodb://localhost:27017` | or Atlas |
+| Redis | `redis://localhost:6379` | optional |
+| Milvus | `localhost:19530` | optional (vector store) |
 
 ---
 
-*PipeGenie – autonomous CI guardrail demo stack.*
+## Troubleshooting (common Windows issues)
+
+| Symptom | Fix |
+|--------|-----|
+| Docker commands fail | Ensure Docker Desktop is running; enable WSL2 backend; run `docker version` |
+| Docker Hub rate limit pulling images | `docker login`, then retry |
+| `WinError 10013` when starting backend on 8000 | Port blocked/in use; run `.\start-backend.ps1 -Port 8001` |
+| Milvus connection error | Ensure `docker compose up -d etcd minio milvus`; or ignore (app degrades gracefully) |
+| SigNoz not receiving data | Start SigNoz (`.\start-signoz.ps1`), set `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318`, keep `OTEL_ENABLED=true` |
+| Gemini quota `429 ResourceExhausted` | Wait, enable billing, reduce request rate, change `GEMINI_MODEL`, or use Ollama |
+| No verification toast | Ensure Docker Desktop is running and `AUTO_RUN_DOCKER_TESTS=true`; check event timeline `metadata.verification` |
+| Frontend says connected but no events | Use the Vite URL (not a file:// build), ensure WS path is `/api/dashboard/ws` and backend is up |
+
+---
+
+
+
+Milvus is used for similarity search over past failures/fixes when available (`MILVUS_HOST`, `MILVUS_PORT`).
